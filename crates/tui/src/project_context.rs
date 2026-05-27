@@ -35,13 +35,12 @@ const PROJECT_CONTEXT_FILES: &[&str] = &[
 
 /// User-level project instructions loaded as a fallback when the workspace and
 /// its parents do not define project context. `.codewhale/` takes priority
-/// over vendor-neutral `.agents/`, which takes priority over legacy
-/// `.deepseek/`, for both WHALE.md and AGENTS.md.
+/// over vendor-neutral `.agents/` (AGENTS.md only), which takes priority over
+/// legacy `.deepseek/`.
 const GLOBAL_AGENTS_RELATIVE_PATH: &[&str] = &[".codewhale", "AGENTS.md"];
 const GLOBAL_AGENTS_VENDOR_NEUTRAL_PATH: &[&str] = &[".agents", "AGENTS.md"];
 const GLOBAL_AGENTS_LEGACY_PATH: &[&str] = &[".deepseek", "AGENTS.md"];
 const GLOBAL_WHALE_RELATIVE_PATH: &[&str] = &[".codewhale", "WHALE.md"];
-const GLOBAL_WHALE_VENDOR_NEUTRAL_PATH: &[&str] = &[".agents", "WHALE.md"];
 const GLOBAL_WHALE_LEGACY_PATH: &[&str] = &[".deepseek", "WHALE.md"];
 
 /// Maximum size for project context files (to prevent loading huge files)
@@ -515,14 +514,12 @@ fn load_global_agents_context(workspace: &Path, home_dir: Option<&Path>) -> Opti
     // Priority order:
     // 1. ~/.codewhale/WHALE.md      (CodeWhale-native)
     // 2. ~/.codewhale/AGENTS.md     (new config directory)
-    // 3. ~/.agents/WHALE.md         (vendor-neutral fallback)
-    // 4. ~/.agents/AGENTS.md        (vendor-neutral fallback)
-    // 5. ~/.deepseek/WHALE.md       (legacy fallback)
-    // 6. ~/.deepseek/AGENTS.md      (legacy fallback)
+    // 3. ~/.agents/AGENTS.md        (vendor-neutral, AGENTS.md only)
+    // 4. ~/.deepseek/WHALE.md       (legacy fallback)
+    // 5. ~/.deepseek/AGENTS.md      (legacy fallback)
     let candidates: &[&[&str]] = &[
         GLOBAL_WHALE_RELATIVE_PATH,
         GLOBAL_AGENTS_RELATIVE_PATH,
-        GLOBAL_WHALE_VENDOR_NEUTRAL_PATH,
         GLOBAL_AGENTS_VENDOR_NEUTRAL_PATH,
         GLOBAL_WHALE_LEGACY_PATH,
         GLOBAL_AGENTS_LEGACY_PATH,
