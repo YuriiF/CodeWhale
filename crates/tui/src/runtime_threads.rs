@@ -1997,6 +1997,7 @@ impl RuntimeThreadManager {
             search_api_key: self.config.search.as_ref().and_then(|s| s.api_key.clone()),
             tools_always_load: self.config.tools_always_load(),
             verification_enabled: true,
+            verification_max_retries: 2,
         };
 
         let engine = spawn_engine(engine_cfg, &self.config);

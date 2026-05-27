@@ -734,6 +734,7 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         search_api_key: config.search.as_ref().and_then(|s| s.api_key.clone()),
         tools_always_load: config.tools_always_load(),
         verification_enabled: true,
+        verification_max_retries: 2,
     }
 }
 

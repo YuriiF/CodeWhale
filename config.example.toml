@@ -532,7 +532,7 @@ default_text_model = "deepseek-ai/deepseek-v4-pro"
 # [verification]
 # enabled = true         # Enable the closed-loop verification gate
 # skip_tools = []        # Tools to skip verification for
-# max_retries = 1        # Max verification attempts per tool (best-effort)
+# max_retries = 2        # Max auto-retry attempts on verification failure
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # LSP Diagnostics (post-edit) (#136)

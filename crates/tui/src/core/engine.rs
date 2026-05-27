@@ -179,6 +179,10 @@ pub struct EngineConfig {
     /// exec_shell) before accepting them as fact.
     /// Default: true in YOLO mode, false otherwise.
     pub verification_enabled: bool,
+    /// Max auto-retry attempts when the verification gate fails.
+    /// File-mutating tools (write_file, edit_file, apply_patch) are
+    /// re-executed on [VERIFY FAIL] up to this many times. Default: 2.
+    pub verification_max_retries: u32,
     /// Per-step DeepSeek API timeout for sub-agent `create_message` requests.
     /// Resolved from `[subagents] api_timeout_secs` (clamped to 1..=1800)
     /// once at engine construction, then threaded onto every
@@ -239,6 +243,7 @@ impl Default for EngineConfig {
             tools_always_load: HashSet::new(),
             prefer_bwrap: false,
             verification_enabled: true,
+            verification_max_retries: 2,
         }
     }
 }

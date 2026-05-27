@@ -1866,7 +1866,7 @@ impl Engine {
                             "tool_name": outcome.name.clone(),
                             "success": output.success,
                         }));
-                        let output_for_context = compact_tool_result_for_context(
+                        let mut output_for_context = compact_tool_result_for_context(
                             &self.session.model,
                             &outcome.name,
                             &output,
@@ -1897,23 +1897,80 @@ impl Engine {
                                 .await;
                         }
 
-                        // CLOSED-LOOP: verification gate — re-check side-effect
-                        // claims before the result enters the session stream.
-                        let (verify_verdict, verify_annotation) = if self
-                            .config
-                            .verification_enabled
+                        // CLOSED-LOOP: verification gate with auto-retry.
+                        // Re-checks side-effect claims before the result enters
+                        // the session stream. File-mutating tools are retried
+                        // automatically on failure (up to max_retries).
+                        let mut verify_verdict = verify::VerifyVerdict::Skipped;
+                        let mut verify_annotation = String::new();
+                        let mut retry_count: u32 = 0;
+
+                        if self.config.verification_enabled
                             && output_success
                             && tool_was_executed
                         {
-                            let (verdict, annotation) = verify::run_verification(
-                                &outcome.name,
-                                &tool_input,
-                                &self.session.workspace,
-                            );
-                            (verdict, annotation)
-                        } else {
-                            (verify::VerifyVerdict::Skipped, String::new())
-                        };
+                            let max_retries = self.config.verification_max_retries;
+                            let is_retryable =
+                                verify::is_auto_retryable(&outcome.name);
+
+                            loop {
+                                let (verdict, annotation) = verify::run_verification(
+                                    &outcome.name,
+                                    &tool_input,
+                                    &self.session.workspace,
+                                );
+
+                                // If passed, skipped, or unverifiable — done.
+                                let should_retry = matches!(verdict, verify::VerifyVerdict::Fail { .. })
+                                    && is_retryable
+                                    && retry_count < max_retries;
+
+                                if !should_retry {
+                                    verify_verdict = verdict;
+                                    verify_annotation = annotation;
+                                    break;
+                                }
+
+                                // Auto-retry: re-execute the tool.
+                                retry_count += 1;
+                                match Engine::retry_file_tool(
+                                    tool_exec_lock.clone(),
+                                    &outcome.name,
+                                    tool_input.clone(),
+                                    self.tx_event.clone(),
+                                    tool_registry,
+                                    mcp_pool.clone(),
+                                )
+                                .await
+                                {
+                                    Ok((retry_result, _retry_ok)) => {
+                                        // Update the output for context with retry result.
+                                        output_for_context = compact_tool_result_for_context(
+                                            &self.session.model,
+                                            &outcome.name,
+                                            &retry_result,
+                                        );
+                                    }
+                                    Err(_e) => {
+                                        // Retry execution itself failed — stop retrying.
+                                        verify_verdict = verify::VerifyVerdict::Fail {
+                                            expected: "retry execution succeeded".to_string(),
+                                            observed: format!(
+                                                "retry attempt {retry_count} failed to execute"
+                                            ),
+                                        };
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // Annotate successful retries.
+                            if retry_count > 0
+                                && matches!(verify_verdict, verify::VerifyVerdict::Pass)
+                            {
+                                verify_annotation = verify::retry_annotation(retry_count);
+                            }
+                        }
 
                         // Record the verdict for session-level audit.
                         self.session.verification_ledger.push(verify::VerifyRecord {

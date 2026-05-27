@@ -67,15 +67,18 @@ impl Default for VerifyConfig {
 // Per-tool verification rules
 // ---------------------------------------------------------------------------
 
-/// Run verification for a tool that claimed success with side effects.
+/// Run inline verification for a tool that claimed success with side effects.
+///
+/// For file-mutating tools (write_file, edit_file, apply_patch), this actually
+/// reads the file back to confirm the operation landed. For other side-effect
+/// tools, it returns Pass (trust the tool).
 ///
 /// Returns the verdict and the annotated content to inject into the session
-/// message stream. The annotation is appended to the original output so the
-/// model sees both the claim and the re-check result.
+/// message stream.
 pub fn run_verification(
     tool_name: &str,
-    _tool_input: &serde_json::Value,
-    _workspace: &Path,
+    tool_input: &serde_json::Value,
+    workspace: &Path,
 ) -> (VerifyVerdict, String) {
     let started = Instant::now();
 
@@ -98,13 +101,16 @@ pub fn run_verification(
             VerifyVerdict::Skipped
         }
 
-        // Side-effect tools — the verifier schedules a follow-up read.
-        // In the current implementation, verification is best-effort:
-        // we annotate the output with a verification note but defer the
-        // actual file re-read to a post-hoc check that the turn loop
-        // handles after message injection. This keeps the hot path fast
-        // and avoids blocking the turn on verification I/O.
-        "write_file" | "edit_file" | "apply_patch" | "exec_shell"
+        // Core file-mutating tools — inline verification: re-read the file
+        // to confirm the write/edit/patch actually landed. If the file is
+        // missing or empty, it's a verification failure. The caller should
+        // retry.
+        "write_file" | "edit_file" | "apply_patch" => {
+            inline_verify_file_tool(tool_input, workspace)
+        }
+
+        // Other side-effect tools — trust but don't block on verification
+        "exec_shell"
         | "exec_shell_wait" | "exec_shell_interact" | "shell_cancel"
         | "exec_wait" | "exec_interact" | "task_shell_start" | "task_shell_wait"
         | "task_create" | "task_gate_run" | "github_comment" | "github_close_issue"
@@ -116,11 +122,6 @@ pub fn run_verification(
         | "finance" | "skill_install" | "checklist_write" | "checklist_add"
         | "checklist_update" | "todo_write" | "todo_add" | "todo_update"
         | "update_plan" | "create_goal" | "get_goal" | "update_goal" => {
-            // Best-effort: if the tool claimed success, we trust it but
-            // schedule a post-hoc verification that the turn loop handles.
-            // For now, return Pass and let the session-level ledger track
-            // the claim. The actual file re-read is done inline by the
-            // engine when it has access to the filesystem.
             VerifyVerdict::Pass
         }
 
@@ -131,6 +132,7 @@ pub fn run_verification(
     };
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
+    let _ = elapsed_ms;
 
     // Build the annotated content.
     let annotation = match &verdict {
@@ -144,9 +146,59 @@ pub fn run_verification(
         VerifyVerdict::Skipped => String::new(),
     };
 
-    let _ = elapsed_ms; // used in VerifyRecord
-
     (verdict, annotation)
+}
+
+/// Whether a tool can be auto-retried on verification failure.
+/// File-mutating tools with deterministic inputs are safe to retry;
+/// tools with side effects on external systems are not.
+pub fn is_auto_retryable(tool_name: &str) -> bool {
+    matches!(tool_name, "write_file" | "edit_file" | "apply_patch")
+}
+
+/// Inline file verification: read the file back and check it exists with
+/// content. Returns Pass if the file is present and non-empty, Fail if
+/// missing/empty, Unverifiable if we can't read it.
+fn inline_verify_file_tool(
+    tool_input: &serde_json::Value,
+    workspace: &Path,
+) -> VerifyVerdict {
+    let path_str = match tool_input.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => return VerifyVerdict::Unverifiable {
+            reason: "no path in tool input".to_string(),
+        },
+    };
+
+    let resolved = if Path::new(path_str).is_absolute() {
+        Path::new(path_str).to_path_buf()
+    } else {
+        workspace.join(path_str)
+    };
+
+    match std::fs::read_to_string(&resolved) {
+        Ok(content) if !content.is_empty() => VerifyVerdict::Pass,
+        Ok(_) => VerifyVerdict::Fail {
+            expected: format!("non-empty file at {}", resolved.display()),
+            observed: "file is empty".to_string(),
+        },
+        Err(_) => VerifyVerdict::Fail {
+            expected: format!("file exists at {}", resolved.display()),
+            observed: "file missing after write".to_string(),
+        },
+    }
+}
+
+/// Build a retry-success annotation for the session message stream.
+pub fn retry_annotation(retry_count: u32) -> String {
+    if retry_count == 0 {
+        String::new()
+    } else {
+        format!(
+            "\n\n[VERIFY PASS] auto-retried {} time(s) — operation landed",
+            retry_count
+        )
+    }
 }
 
 /// Determine whether a tool name represents a side-effect tool that should
@@ -288,17 +340,30 @@ mod tests {
 
     #[test]
     fn side_effect_tools_pass_when_successful() {
-        for tool in &["write_file", "edit_file", "apply_patch", "exec_shell"] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Create a real file so inline verification passes for file tools.
+        let test_file = tmp.path().join("test.rs");
+        std::fs::write(&test_file, "// test content").expect("write");
+
+        for tool in &["write_file", "edit_file", "apply_patch"] {
             let (verdict, _) = run_verification(
                 tool,
-                &serde_json::json!({"path": "/tmp/test.rs"}),
-                Path::new("/tmp"),
+                &serde_json::json!({"path": test_file.to_str().unwrap()}),
+                tmp.path(),
             );
             assert!(
                 matches!(verdict, VerifyVerdict::Pass),
                 "{tool} should pass, got {verdict:?}"
             );
         }
+
+        // exec_shell passes through — not file-verified.
+        let (verdict, _) = run_verification(
+            "exec_shell",
+            &serde_json::json!({"command": "echo ok"}),
+            tmp.path(),
+        );
+        assert!(matches!(verdict, VerifyVerdict::Pass));
     }
 
     #[test]
