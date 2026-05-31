@@ -49,6 +49,18 @@ This release bundles the work that was prepared on the v0.8.47 integration branc
 - **@-mention menu cap is scrollable.** The composer file-mention popup now keeps up to 128 candidates by default instead of truncating the source list at six entries, with `mention_menu_limit` available in `settings.toml` (#2360 reported by buko).
 - **Dependency refresh.** Updated `tar` from 0.4.45 to 0.4.46.
 
+### Contributors
+
+Thanks to **@Fire-dtx** (#1856), **@harvey2011888** (#1859), **@aboimpinto**
+(#1910, #2295), **@IIzzaya** (#1935), **@Colorful-glassblock** (#1937),
+**@cyq1017** (#1967, #2375), **@imkingjh999** (#2228), **@HUQIANTAO** (#2240),
+**@mvanhorn** (#2156, #2236), **@LING71671** (#1797), **@hongqitai** (#2237),
+**@reidliu41** (#2235, #2241, #2316, #2324, #2357, #2366), **@Sskift**
+(#2248, #2262), **@idling11** (#2266), **@zlh124** (#2319, #2325),
+**@cy2311** (#1861), **@donglovejava** (#2302, #2330), **@nightt5879**
+(#2373, #2344), **@yyyCode** (#2322), **@buko** (#2369, #2360),
+**@T-Phuong-Nguyen** (#2339), and **@app/dependabot** (#2364).
+
 ### Deprecated
 
 - **Moonshot / Kimi provider.** Removed from the `/provider` picker and from `provider = "…"` example docs. CodeWhale is focusing on 1M-context models with prefix-cache economics, which Moonshot's pricing/context surface doesn't compose with cleanly. Existing configs with `provider = "moonshot"` still parse and load — the variant is preserved in `ApiProvider` for backward compatibility — but no new picker entry surfaces it. Full removal is scheduled for v0.9 alongside Whale Pod Mode.
