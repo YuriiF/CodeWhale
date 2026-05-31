@@ -5878,14 +5878,13 @@ fn render(f: &mut Frame, app: &mut App) {
     app.viewport.last_composer_area = Some(chunks[3]);
     {
         let area = chunks[3];
-        let has_panel = app.composer_border && area.height >= 3 && area.width >= 12;
-        let inner = if has_panel {
-            ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
-                .inner(area)
-        } else {
-            area
-        };
+        let inner = ComposerWidget::new(
+            app,
+            composer_max_height,
+            &slash_menu_entries,
+            &mention_menu_entries,
+        )
+        .inner_area(area);
         app.viewport.last_composer_content = Some(inner);
 
         // Compute scroll offset and top padding for mouse coordinate mapping.

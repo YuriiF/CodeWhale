@@ -492,7 +492,7 @@ impl<'a> ComposerWidget<'a> {
         self.app.composer_border && area.height >= 3 && area.width >= 12
     }
 
-    fn inner_area(&self, area: Rect) -> Rect {
+    pub(crate) fn inner_area(&self, area: Rect) -> Rect {
         if self.has_panel(area) {
             Block::default().borders(Borders::ALL).inner(area)
         } else {
