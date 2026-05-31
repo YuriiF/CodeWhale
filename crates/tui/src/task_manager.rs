@@ -1639,7 +1639,7 @@ fn default_auto_approve() -> bool {
     true
 }
 
-/// Default task persistence location (`~/.deepseek/tasks`).
+/// Default task persistence location (`~/.codewhale/tasks`, falling back to `~/.deepseek/tasks`).
 #[must_use]
 pub fn default_tasks_dir() -> PathBuf {
     if let Ok(path) = std::env::var("DEEPSEEK_TASKS_DIR")
@@ -1648,7 +1648,11 @@ pub fn default_tasks_dir() -> PathBuf {
         return PathBuf::from(path);
     }
     if let Some(home) = dirs::home_dir() {
-        return home.join(".codewhale").join("tasks");
+        let primary = home.join(".codewhale").join("tasks");
+        if primary.exists() {
+            return primary;
+        }
+        return home.join(".deepseek").join("tasks");
     }
     PathBuf::from(".codewhale").join("tasks")
 }

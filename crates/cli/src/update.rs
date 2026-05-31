@@ -387,9 +387,13 @@ fn release_base_url_from_env(version: &str) -> Option<String> {
             }
         }
     }
-    // Auto-detect CNB mirror when CODEWHALE_USE_CNB_MIRROR is set
-    if std::env::var(CNB_MIRROR_ENV).is_ok() {
-        return Some(cnb_release_base_url(version));
+    // Auto-detect CNB mirror when CODEWHALE_USE_CNB_MIRROR is set to a non-empty,
+    // non-falsy value (consistent with other env-var checks in this function).
+    if let Ok(val) = std::env::var(CNB_MIRROR_ENV) {
+        let val = val.trim().to_lowercase();
+        if !val.is_empty() && val != "0" && val != "false" && val != "no" {
+            return Some(cnb_release_base_url(version));
+        }
     }
     None
 }

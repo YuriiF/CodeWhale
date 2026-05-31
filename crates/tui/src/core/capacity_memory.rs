@@ -60,16 +60,18 @@ fn capacity_memory_dirs() -> Vec<PathBuf> {
         let primary = home.join(".codewhale").join("memory");
         if primary.exists() {
             dirs.push(primary);
+        } else {
+            dirs.push(home.join(".deepseek").join("memory"));
         }
-        dirs.push(home.join(".deepseek").join("memory"));
     }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let primary_cwd = cwd.join(".codewhale").join("memory");
     if primary_cwd.exists() {
         dirs.push(primary_cwd);
+    } else {
+        dirs.push(cwd.join(".deepseek").join("memory"));
     }
-    dirs.push(cwd.join(".deepseek").join("memory"));
 
     dirs.dedup();
     dirs
