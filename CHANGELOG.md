@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit Rustls ring-provider installation for the no-provider TLS build, and
   OHOS fallbacks for unsupported keyring, clipboard, sandbox, browser-open, TTY,
   execpolicy Starlark parsing, and self-update surfaces.
+- Added `.github/AUTHOR_MAP` and a CI co-author credit check so harvested
+  commits use GitHub-mappable numeric noreply identities instead of `.local`,
+  placeholder, bot/tool, or raw third-party emails.
 
 ### Changed
 

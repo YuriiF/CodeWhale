@@ -98,8 +98,12 @@ When this happens:
 - If the maintainer copies or adapts your code, the harvested commit also
   keeps attribution with the original author identity when possible: either by
   preserving the commit author on a cherry-pick or by adding a
-  `Co-authored-by: Name <email>` trailer from the original PR commit. This is
+  `Co-authored-by: Name <id+login@users.noreply.github.com>` trailer. This is
   what lets GitHub's contribution surfaces recognize more than prose credit.
+  Maintainers should use `.github/AUTHOR_MAP`, or run
+  `gh api users/<login> --jq '"\(.id)+\(.login)@users.noreply.github.com"'`,
+  rather than copying raw, `.local`, or old-style noreply emails from a
+  contributor's machine.
 - The `CHANGELOG.md` entry for the next release credits you by handle.
 - The auto-close workflow closes your PR with a templated thank-you and
   a link to the commit on `main`.

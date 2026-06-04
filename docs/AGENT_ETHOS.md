@@ -23,6 +23,12 @@ could not cover by ourselves.
   issues, keep author/co-author attribution where possible, add
   `Harvested from PR #N by @handle`, and credit the contributor in the
   changelog or release notes.
+- Make credit machine-readable. If a harvested commit cannot preserve the
+  contributor as the author, add a `Co-authored-by` trailer with the GitHub
+  numeric noreply address from `.github/AUTHOR_MAP` or
+  `gh api users/<login> --jq '"\(.id)+\(.login)@users.noreply.github.com"'`.
+  Do not use `.local`, placeholder, bot/tool, or raw third-party emails for
+  human contributor credit.
 - Deferral is a maintainer action, not a dismissal. If a PR or issue is not
   ready, say what is blocked, what evidence would change the decision, and
   which part of the work remains valuable.
