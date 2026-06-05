@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   helper for future fallback routing. This preserves the requested contract
   without enabling silent runtime provider switches yet (#2574, #2777). Thanks
   @hsdbeebou for the request and @idling11 for the data-model draft.
+- Added `/sidebar` so users can toggle, show, hide, and optionally persist the
+  TUI sidebar from the command line instead of relying on copy-hostile sidebar
+  state during long transcript work (#2766, #2788). Thanks @mo-vic for the
+  detailed report and @aboimpinto for the fix.
 
 ### Changed
 
