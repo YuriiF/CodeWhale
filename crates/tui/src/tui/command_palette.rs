@@ -1147,6 +1147,58 @@ mod tests {
     }
 
     #[test]
+    fn command_palette_has_one_entry_for_every_registered_command() {
+        let tmp = TempDir::new().expect("tempdir");
+        let skills_dir = tmp.path().join("skills");
+        let mcp_config_path = tmp.path().join("mcp.json");
+        let entries = build_entries(
+            Locale::En,
+            skills_dir.as_path(),
+            tmp.path(),
+            mcp_config_path.as_path(),
+            None,
+        );
+
+        let command_entries = entries
+            .iter()
+            .filter(|entry| entry.section == PaletteSection::Command)
+            .collect::<Vec<_>>();
+        assert_eq!(command_entries.len(), commands::COMMANDS.len());
+
+        for command in commands::COMMANDS {
+            let label = format!("/{}", command.name);
+            let matching = command_entries
+                .iter()
+                .filter(|entry| entry.label == label)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching.len(),
+                1,
+                "expected one palette entry for /{}",
+                command.name
+            );
+
+            let entry = matching[0];
+            assert_eq!(entry.command, command.palette_command());
+            assert!(
+                entry
+                    .description
+                    .contains(command.description_for(Locale::En)),
+                "/{} palette description should include command help text",
+                command.name
+            );
+            if command.requires_argument() {
+                assert!(
+                    entry.description.contains(command.usage),
+                    "/{} palette description should include usage {:?}",
+                    command.name,
+                    command.usage
+                );
+            }
+        }
+    }
+
+    #[test]
     fn command_palette_inserts_model_command_for_argument_entry() {
         let entries = build_entries(
             Locale::En,

@@ -1271,6 +1271,127 @@ mod tests {
     }
 
     #[test]
+    fn command_registry_metadata_is_complete_and_palette_safe() {
+        for command in COMMANDS {
+            assert!(!command.name.is_empty(), "command name must not be empty");
+            assert_eq!(
+                command.name.trim(),
+                command.name,
+                "/{} command name must not need trimming",
+                command.name
+            );
+            assert!(
+                command
+                    .name
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()),
+                "/{} command names must stay lowercase ASCII",
+                command.name
+            );
+
+            let expected_usage_prefix = format!("/{}", command.name);
+            assert!(
+                command.usage.starts_with(&expected_usage_prefix),
+                "/{} usage must start with its canonical slash command, got {:?}",
+                command.name,
+                command.usage
+            );
+
+            let description = command.description_for(Locale::En);
+            assert!(
+                !description.trim().is_empty(),
+                "/{} must have non-empty English help text",
+                command.name
+            );
+
+            let palette_command = command.palette_command();
+            assert!(
+                palette_command.starts_with(&expected_usage_prefix),
+                "/{} palette command must use the canonical command, got {:?}",
+                command.name,
+                palette_command
+            );
+            assert_eq!(
+                palette_command.ends_with(' '),
+                command.requires_argument(),
+                "/{} palette command spacing must match argument requirement",
+                command.name
+            );
+
+            for &alias in command.aliases {
+                assert!(
+                    !alias.trim().is_empty(),
+                    "/{} alias must not be empty",
+                    command.name
+                );
+                assert_eq!(
+                    alias.trim(),
+                    alias,
+                    "/{} alias /{alias} must not need trimming",
+                    command.name
+                );
+                assert!(
+                    !alias.starts_with('/'),
+                    "/{} alias /{alias} must be stored without a slash",
+                    command.name
+                );
+                assert!(
+                    !alias.chars().any(char::is_whitespace),
+                    "/{} alias /{alias} must not contain whitespace",
+                    command.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn command_info_resolves_canonical_names_and_aliases() {
+        for command in COMMANDS {
+            for lookup in [command.name.to_string(), format!("/{}", command.name)] {
+                let resolved = get_command_info(&lookup)
+                    .unwrap_or_else(|| panic!("{lookup:?} should resolve to /{}", command.name));
+                assert_eq!(resolved.name, command.name);
+            }
+
+            for &alias in command.aliases {
+                for lookup in [alias.to_string(), format!("/{alias}")] {
+                    let resolved = get_command_info(&lookup).unwrap_or_else(|| {
+                        panic!("{lookup:?} should resolve to /{}", command.name)
+                    });
+                    assert_eq!(resolved.name, command.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_registered_command_has_a_help_topic() {
+        let mut app = create_test_app();
+        for command in COMMANDS {
+            let result = execute(&format!("/help {}", command.name), &mut app);
+            assert!(
+                !result.is_error,
+                "/help {} returned an error: {result:?}",
+                command.name
+            );
+            let message = result
+                .message
+                .unwrap_or_else(|| panic!("/help {} should return text", command.name));
+            assert!(
+                message.contains(command.name),
+                "/help {} should mention the command name, got {message:?}",
+                command.name
+            );
+            assert!(
+                message.contains(command.usage),
+                "/help {} should include usage {:?}, got {message:?}",
+                command.name,
+                command.usage
+            );
+        }
+    }
+
+    #[test]
     fn context_command_opens_inspector_and_keeps_ctx_alias() {
         let context = COMMANDS
             .iter()
@@ -1532,6 +1653,86 @@ mod tests {
     /// stays parallel-safe.
     fn skip_in_dispatch_smoke(name: &str) -> bool {
         name == "restore"
+    }
+
+    #[test]
+    fn slash_parser_preserves_arguments_after_the_command_name() {
+        let mut app = create_test_app();
+        let result = execute("/agent 2 review   this   carefully", &mut app);
+        assert!(!result.is_error);
+        let Some(AppAction::SendMessage(message)) = result.action else {
+            panic!("expected /agent to send a model instruction");
+        };
+        assert!(message.contains(r#"prompt: "review   this   carefully""#));
+        assert!(message.contains("max_depth: 2"));
+
+        let mut app = create_test_app();
+        let result = execute("   /relay   ship   command   harness   ", &mut app);
+        assert!(!result.is_error);
+        let Some(AppAction::SendMessage(message)) = result.action else {
+            panic!("expected /relay to send a model instruction");
+        };
+        assert!(message.contains("Requested relay focus: ship   command   harness"));
+
+        let mut app = create_test_app();
+        let result = execute("/rlm 3 inspect   this   corpus", &mut app);
+        assert!(!result.is_error);
+        let Some(AppAction::SendMessage(message)) = result.action else {
+            panic!("expected /rlm to send a model instruction");
+        };
+        assert!(message.contains(r#"content: "inspect   this   corpus""#));
+        assert!(message.contains("sub_rlm_max_depth: 3"));
+    }
+
+    #[test]
+    fn representative_command_groups_keep_dispatch_surfaces() {
+        let mut app = create_test_app();
+        let help = execute("/help clear", &mut app)
+            .message
+            .expect("/help clear should return text");
+        assert!(help.contains("clear"));
+        assert!(help.contains("/clear"));
+
+        let mut app = create_test_app();
+        let result = execute("/config", &mut app);
+        assert!(matches!(result.action, Some(AppAction::OpenConfigView)));
+
+        let mut app = create_test_app();
+        let result = execute("/relay command boundary", &mut app);
+        assert!(!result.is_error);
+        assert!(matches!(
+            result.action,
+            Some(AppAction::SendMessage(message))
+                if message.contains("Requested relay focus: command boundary")
+        ));
+
+        let mut app = create_test_app();
+        let note_help = execute("/note help", &mut app)
+            .message
+            .expect("/note help should return text");
+        assert!(note_help.contains("Usage: /note"));
+
+        let mut app = create_test_app();
+        let result = execute("/hunt ship layer 2 | budget: 100", &mut app);
+        assert!(!result.is_error);
+        assert_eq!(app.hunt.quarry.as_deref(), Some("ship layer 2"));
+        assert_eq!(app.hunt.token_budget, Some(100));
+
+        let (mut app, _tmpdir, _guard) = create_isolated_test_app();
+        let skills = execute("/skills", &mut app)
+            .message
+            .expect("/skills should return text");
+        assert!(skills.contains("Skills location:"));
+
+        let mut app = create_test_app();
+        let result = execute("/task list", &mut app);
+        assert!(matches!(result.action, Some(AppAction::TaskList)));
+
+        let mut app = create_test_app();
+        let tokens = execute("/tokens", &mut app)
+            .message
+            .expect("/tokens should return text");
+        assert!(tokens.contains("deepseek-v4-pro"));
     }
 
     /// Smoke test: every entry in `COMMANDS` must dispatch to a real handler.
