@@ -701,32 +701,65 @@ impl Personality {
 
 // ── Composition ───────────────────────────────────────────────────────
 
-fn mode_prompt(mode: AppMode) -> &'static str {
-    match mode {
-        AppMode::Agent => AGENT_MODE,
-        AppMode::Yolo => YOLO_MODE,
-        AppMode::Plan => PLAN_MODE,
-    }
-}
+/// Generate a static reference block containing all mode and approval policy
+/// descriptions. This lives in the frozen system-prompt prefix (sent once per
+/// session) so the per-turn `<runtime_prompt>` tag can be a minimal pointer
+/// (`<runtime_prompt mode="yolo" approval="auto"/>`) instead of repeating the
+/// full policy text on every API request.
+pub(crate) fn render_runtime_policy_reference() -> String {
+    let taxonomy_agent = render_core_tool_taxonomy_body(AppMode::Agent);
+    let taxonomy_plan = render_core_tool_taxonomy_body(AppMode::Plan);
+    let taxonomy_yolo = render_core_tool_taxonomy_body(AppMode::Yolo);
 
-fn default_approval_mode_for_mode(mode: AppMode) -> ApprovalMode {
-    match mode {
-        AppMode::Agent => ApprovalMode::Suggest,
-        AppMode::Yolo => ApprovalMode::Auto,
-        AppMode::Plan => ApprovalMode::Never,
-    }
-}
+    let mut out = String::with_capacity(8192);
+    out.push_str("## Runtime Policy Reference\n\n");
 
-pub(crate) fn approval_prompt_for_mode(mode: AppMode, approval_mode: ApprovalMode) -> &'static str {
-    match mode {
-        AppMode::Yolo => AUTO_APPROVAL,
-        AppMode::Plan => NEVER_APPROVAL,
-        AppMode::Agent => match approval_mode {
-            ApprovalMode::Auto => AUTO_APPROVAL,
-            ApprovalMode::Suggest => SUGGEST_APPROVAL,
-            ApprovalMode::Never => NEVER_APPROVAL,
-        },
-    }
+    // Protocol explanation — how the per-turn tag maps to this reference.
+    out.push_str(
+        "Each turn, the latest message in the transcript will contain a \
+         `<runtime_prompt>` tag that specifies the currently active mode and \
+         approval policy. When you see this tag, look up the corresponding \
+         rules below and apply them for the current turn.\n\n\
+         The tag format is:\n\
+         `<runtime_prompt visibility=\"internal\" mode=\"<mode>\" approval=\"<approval>\"/>`\n\n",
+    );
+
+    // ── Mode reference ─────────────────────────────────────────────────
+    out.push_str("### Modes\n\n");
+
+    out.push_str("#### agent\n\n");
+    out.push_str(&taxonomy_agent);
+    out.push_str("\n\n");
+    out.push_str(AGENT_MODE.trim());
+    out.push_str("\n\n");
+
+    out.push_str("#### plan\n\n");
+    out.push_str(&taxonomy_plan);
+    out.push_str("\n\n");
+    out.push_str(PLAN_MODE.trim());
+    out.push_str("\n\n");
+
+    out.push_str("#### yolo\n\n");
+    out.push_str(&taxonomy_yolo);
+    out.push_str("\n\n");
+    out.push_str(YOLO_MODE.trim());
+    out.push_str("\n\n");
+
+    // ── Approval policy reference ──────────────────────────────────────
+    out.push_str("### Approval Policies\n\n");
+
+    out.push_str("#### auto\n\n");
+    out.push_str(AUTO_APPROVAL.trim());
+    out.push_str("\n\n");
+
+    out.push_str("#### suggest\n\n");
+    out.push_str(SUGGEST_APPROVAL.trim());
+    out.push_str("\n\n");
+
+    out.push_str("#### never\n\n");
+    out.push_str(NEVER_APPROVAL.trim());
+
+    out
 }
 
 /// Compose the full system prompt in deterministic order:
@@ -751,7 +784,10 @@ const TOOL_TAXONOMY_DISCOVERY: &[&str] = &["grep_files", "file_search"];
 const TOOL_TAXONOMY_GIT: &[&str] = &["git_status", "git_diff"];
 const TOOL_TAXONOMY_VERIFICATION: &[&str] = &["run_tests", "run_verifiers"];
 
-pub(crate) fn render_core_tool_taxonomy_block(mode: AppMode) -> String {
+/// Return the core tool taxonomy body **without** a markdown heading.
+/// Suitable for embedding under a mode-specific sub-heading in the
+/// Runtime Policy Reference without producing a broken heading hierarchy.
+pub(crate) fn render_core_tool_taxonomy_body(mode: AppMode) -> String {
     let core_tools = core_taxonomy_tools_for_mode(mode);
     let mut sentences = Vec::new();
 
@@ -769,7 +805,7 @@ pub(crate) fn render_core_tool_taxonomy_block(mode: AppMode) -> String {
         !sentences.is_empty(),
         "core tool taxonomy has no active tool groups"
     );
-    format!("## Core Tool Taxonomy\n\n{}", sentences.join(" "))
+    sentences.join(" ")
 }
 
 fn core_taxonomy_tools_for_mode(mode: AppMode) -> Vec<&'static str> {
@@ -1165,6 +1201,13 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     full_prompt.push_str("\n\n");
     full_prompt.push_str(COMPACT_TEMPLATE);
 
+    // 5a. Runtime policy reference — all mode and approval policy descriptions
+    //     live here in the frozen prefix so the per-turn <runtime_prompt> tag
+    //     can be a minimal pointer instead of repeating the full policy text
+    //     on every API request (up to ~500 tokens saved per turn).
+    full_prompt.push_str("\n\n");
+    full_prompt.push_str(&render_runtime_policy_reference());
+
     // ── Volatile-content boundary ─────────────────────────────────────────
     // Everything below drifts mid-session and busts the prefix cache for
     // bytes that follow. All static layers (mode, project context, env,
@@ -1537,8 +1580,10 @@ mod tests {
             Personality::Calm,
             "deepseek-v4-pro",
         );
-        // The generated "## Core Tool Taxonomy" block now travels in the
-        // request-time <mode_prompt> metadata rather than being prepended here.
+        // The core tool taxonomy (grep_files / git_status / run_tests hints)
+        // is no longer prepended as a standalone "## Core Tool Taxonomy" block.
+        // It now lives inside the "## Runtime Policy Reference" section of the
+        // system prompt, scoped under each mode sub-heading.
         // (The "## Toolbox" section from the Constitutional preamble remains.)
         assert!(!prompt.contains("## Core Tool Taxonomy"));
         assert!(prompt.contains("You are deepseek-v4-pro"));
@@ -1546,7 +1591,7 @@ mod tests {
 
     #[test]
     fn plan_prompt_taxonomy_omits_run_tests() {
-        let taxonomy = render_core_tool_taxonomy_block(AppMode::Plan);
+        let taxonomy = render_core_tool_taxonomy_body(AppMode::Plan);
         // Plan taxonomy should omit execution tools (verified at the source).
         assert!(
             taxonomy.contains("for discovery") && taxonomy.contains("for git inspection"),
@@ -1559,8 +1604,9 @@ mod tests {
             "Plan taxonomy must not mention run_tests, run_verifiers, or exec_shell"
         );
         // The taxonomy block is rendered correctly but no longer inlined
-        // into the base system prompt — it travels in request-time
-        // <mode_prompt> metadata instead.
+        // into the base system prompt — it lives inside the
+        // "## Runtime Policy Reference" section of the system prompt,
+        // scoped under each mode sub-heading.
     }
 
     #[test]
@@ -1599,6 +1645,65 @@ mod tests {
         assert!(
             text.contains("The Constitution of CodeWhale (Articles I-VII) governs your behavior"),
             "authority recap must reference the Constitution"
+        );
+    }
+
+    #[test]
+    fn runtime_policy_reference_is_included_in_full_prompt() {
+        let tmp = tempdir().expect("tempdir");
+        let text = match system_prompt_for_mode_with_context_skills_session_and_approval(
+            AppMode::Agent,
+            tmp.path(),
+            None,
+            None,
+            None,
+            PromptSessionContext::default(),
+        ) {
+            SystemPrompt::Text(text) => text,
+            SystemPrompt::Blocks(_) => panic!("expected text system prompt"),
+        };
+
+        assert!(
+            text.contains("## Runtime Policy Reference"),
+            "full system prompt must contain the Runtime Policy Reference lookup table"
+        );
+        assert!(
+            text.contains(
+                "<runtime_prompt visibility=\"internal\" mode=\"<mode>\" approval=\"<approval>\"/>"
+            ),
+            "Runtime Policy Reference must explain the per-turn tag format"
+        );
+        assert!(
+            text.contains("### Modes"),
+            "Runtime Policy Reference must contain the Modes section"
+        );
+        assert!(
+            text.contains("#### agent"),
+            "Runtime Policy Reference must document Agent mode"
+        );
+        assert!(
+            text.contains("#### plan"),
+            "Runtime Policy Reference must document Plan mode"
+        );
+        assert!(
+            text.contains("#### yolo"),
+            "Runtime Policy Reference must document YOLO mode"
+        );
+        assert!(
+            text.contains("### Approval Policies"),
+            "Runtime Policy Reference must contain the Approval Policies section"
+        );
+        assert!(
+            text.contains("#### auto"),
+            "Runtime Policy Reference must document auto approval"
+        );
+        assert!(
+            text.contains("#### suggest"),
+            "Runtime Policy Reference must document suggest approval"
+        );
+        assert!(
+            text.contains("#### never"),
+            "Runtime Policy Reference must document never approval"
         );
     }
 
@@ -1996,7 +2101,7 @@ mod tests {
             "base prompt must not contain static CJK priming tokens"
         );
         for mode in [AppMode::Agent, AppMode::Plan, AppMode::Yolo] {
-            let taxonomy = render_core_tool_taxonomy_block(mode);
+            let taxonomy = render_core_tool_taxonomy_body(mode);
             assert!(
                 !contains_cjk(&taxonomy),
                 "tool taxonomy must not contain static CJK priming tokens: {taxonomy:?}"
