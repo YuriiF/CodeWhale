@@ -508,10 +508,9 @@ pub(super) fn suggest_command_names(input: &str, limit: usize) -> Vec<String> {
     for command in COMMANDS {
         let mut best: Option<(u8, usize)> = None;
         for candidate in std::iter::once(command.name).chain(command.aliases.iter().copied()) {
-            let candidate = candidate.to_ascii_lowercase();
-            let prefix_match = candidate.starts_with(&query) || query.starts_with(&candidate);
-            let contains_match = candidate.contains(&query) || query.contains(&candidate);
-            let distance = edit_distance(&candidate, &query);
+            let prefix_match = candidate.starts_with(&query) || query.starts_with(candidate);
+            let contains_match = candidate.contains(&query) || query.contains(candidate);
+            let distance = edit_distance(candidate, &query);
             let close_typo = distance <= 2;
             if !(prefix_match || contains_match || close_typo) {
                 continue;

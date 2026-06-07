@@ -798,6 +798,11 @@ mod tests {
                     "/{} alias /{alias} must not contain whitespace",
                     command.name
                 );
+                assert!(
+                    !alias.chars().any(|ch| ch.is_ascii_uppercase()),
+                    "/{} alias /{alias} must not contain uppercase ASCII",
+                    command.name
+                );
             }
         }
     }
