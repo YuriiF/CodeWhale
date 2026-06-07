@@ -726,7 +726,17 @@ fn leading_whitespace_fuzzy_matches(contents: &str, search: &str) -> Vec<(usize,
         let Some(&mapped_start) = byte_map.get(norm_start) else {
             break;
         };
-        let original_start = line_start_before(contents, mapped_start);
+        // Use the actual match start position, expanding to line start only
+        // when the match begins at a line boundary in the normalized text.
+        // This prevents destroying preceding text on the same line when
+        // the match starts mid-line after whitespace stripping.
+        let original_start = if norm_start == 0 || normalized_contents.as_bytes()[norm_start - 1] == b'\n' {
+            // Match starts at a line boundary — use line start for full-line replacement.
+            line_start_before(contents, mapped_start)
+        } else {
+            // Match starts mid-line — use the exact mapped position.
+            mapped_start
+        };
         let original_end = byte_map.get(norm_end).copied().unwrap_or(contents.len());
         matches.push((original_start, original_end));
         cursor = norm_start.saturating_add(1);

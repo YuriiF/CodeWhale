@@ -277,12 +277,20 @@ async fn tool_handler(
     let cwd = req
         .cwd
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    // Resolve approval policy from config instead of hardcoding.
+    let approval_mode = {
+        let cfg = state.config.read().await;
+        cfg.approval_policy
+            .as_deref()
+            .and_then(|p| match p.trim().to_ascii_lowercase().as_str() {
+                "auto" | "yolo" => Some(codewhale_execpolicy::AskForApproval::UnlessTrusted),
+                "never" | "deny" => Some(codewhale_execpolicy::AskForApproval::OnRequest),
+                _ => None,
+            })
+            .unwrap_or(codewhale_execpolicy::AskForApproval::OnRequest)
+    };
     match runtime
-        .invoke_tool(
-            req.call,
-            codewhale_execpolicy::AskForApproval::OnRequest,
-            &cwd,
-        )
+        .invoke_tool(req.call, approval_mode, &cwd)
         .await
     {
         Ok(value) => Json(value),
