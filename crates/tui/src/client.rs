@@ -861,7 +861,10 @@ impl DeepSeekClient {
             );
             anyhow::bail!("Failed to list models: HTTP {status}: {error_text}");
         }
-        let response_text = response.text().await.unwrap_or_default();
+        let response_text = response
+            .text()
+            .await
+            .context("Failed to read models response body")?;
 
         parse_models_response(&response_text)
     }

@@ -174,7 +174,10 @@ impl DeepSeekClient {
             anyhow::bail!("Failed to call DeepSeek Chat API: HTTP {status}: {error_text}");
         }
 
-        let response_text = response.text().await.unwrap_or_default();
+        let response_text = response
+            .text()
+            .await
+            .context("Failed to read Chat API response body")?;
         let value: Value =
             serde_json::from_str(&response_text).context("Failed to parse Chat API JSON")?;
         let parsed = parse_chat_message(&value)?;
@@ -447,12 +450,11 @@ impl DeepSeekClient {
                 }
             }
 
-            // Close any open blocks
-            if thinking_started {
-                yield Ok(StreamEvent::ContentBlockStop { index: content_index.saturating_sub(1) });
-            }
-            if text_started {
-                yield Ok(StreamEvent::ContentBlockStop { index: content_index.saturating_sub(1) });
+            // Close any open blocks — content_index points to the
+            // currently active open block (it is only incremented
+            // *after* a block is closed, not when opened).
+            if thinking_started || text_started {
+                yield Ok(StreamEvent::ContentBlockStop { index: content_index });
             }
 
             release_stream_buffer(byte_buf);
