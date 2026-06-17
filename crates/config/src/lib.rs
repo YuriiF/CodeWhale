@@ -6288,7 +6288,10 @@ unix_socket_path = "/tmp/cw-hooks.sock"
         let body = fs::read_to_string(&config_path).expect("read config");
         assert!(body.contains("# my deepseek key"), "api_key comment lost");
         assert!(body.contains("# my current model"), "model comment lost");
-        assert!(body.contains("model = \"deepseek-v4-pro\""), "new model not written");
+        assert!(
+            body.contains("model = \"deepseek-v4-pro\""),
+            "new model not written"
+        );
         assert!(body.contains("api_key = \"sk-1234\""), "api_key lost");
     }
 
