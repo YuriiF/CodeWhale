@@ -3275,18 +3275,22 @@ pub struct ConfigStore {
     path: PathBuf,
     pub config: ConfigToml,
     permissions: PermissionsToml,
+    /// Original file text, retained so [`save`](Self::save) can merge
+    /// comments back after serialisation.
+    original_raw: Option<String>,
 }
 
 impl ConfigStore {
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
         let path = resolve_config_path(path)?;
-        let config = if path.exists() {
+        let (config, original_raw) = if path.exists() {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read config at {}", path.display()))?;
-            toml::from_str(&raw)
-                .with_context(|| format!("failed to parse config at {}", path.display()))?
+            let parsed: ConfigToml = toml::from_str(&raw)
+                .with_context(|| format!("failed to parse config at {}", path.display()))?;
+            (parsed, Some(raw))
         } else {
-            ConfigToml::default()
+            (ConfigToml::default(), None)
         };
         let permissions = load_sibling_permissions(&path)?;
 
@@ -3294,6 +3298,7 @@ impl ConfigStore {
             path,
             config,
             permissions,
+            original_raw,
         })
     }
 
@@ -3303,7 +3308,16 @@ impl ConfigStore {
                 format!("failed to create config directory {}", parent.display())
             })?;
         }
-        let body = toml::to_string_pretty(&self.config).context("failed to serialize config")?;
+        let body = if let Some(ref original_raw) = self.original_raw {
+            let serialized =
+                toml::to_string_pretty(&self.config).context("failed to serialize config")?;
+            merge_and_preserve_comments(&serialized, original_raw).unwrap_or_else(|e| {
+                tracing::warn!("failed to merge config comments, saving without them: {e:#}");
+                serialized
+            })
+        } else {
+            toml::to_string_pretty(&self.config).context("failed to serialize config")?
+        };
         match fs::read_to_string(&self.path) {
             Ok(existing) => {
                 if existing == body {
@@ -3464,6 +3478,91 @@ fn write_one_time_config_backup(path: &Path) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Merge comments and formatting from an original TOML file into a
+/// freshly serialized document so user annotations (comments, whitespace,
+/// disabled keys) survive config rewrites.
+///
+/// `original_raw` is the raw text of the file before the change; the
+/// function parses it internally with [`toml_edit`] so callers stay free
+/// of that dependency.
+pub fn merge_and_preserve_comments(serialized: &str, original_raw: &str) -> Result<String> {
+    let original = original_raw
+        .parse::<toml_edit::DocumentMut>()
+        .context("failed to parse original config for comment merge")?;
+
+    let mut new_doc = serialized
+        .parse::<toml_edit::DocumentMut>()
+        .context("failed to parse serialized config for comment merge")?;
+
+    // Reuse the original document’s trailing text (file-footer comments /
+    // disabled keys) so they survive the rewrite.
+    new_doc.set_trailing(original.trailing().clone());
+
+    // Copy the top-level table's decor (document-header comments, whitespace
+    // before the first key) which `toml_edit` stores on the root `Table` itself.
+    *new_doc.as_table_mut().decor_mut() = original.as_table().decor().clone();
+
+    merge_decor_table(new_doc.as_table_mut(), original.as_table());
+
+    Ok(new_doc.to_string())
+}
+
+/// Recursively copy `decor` (prefix/suffix comments and whitespace) from
+/// every key in `source` that also exists in `target`.
+fn merge_decor_table(target: &mut toml_edit::Table, source: &toml_edit::Table) {
+    // Collect keys first — the borrow checker won't let us hold
+    // `get_key_value_mut` while iterating.
+    let keys: Vec<String> = source.iter().map(|(k, _)| k.to_owned()).collect();
+    for key in &keys {
+        let Some((source_key, source_item)) = source.get_key_value(key) else {
+            continue;
+        };
+        let Some((mut target_key_mut, target_item)) = target.get_key_value_mut(key) else {
+            continue;
+        };
+
+        // Copy the key-level decor (comments before the key itself)
+        *target_key_mut.leaf_decor_mut() = source_key.leaf_decor().clone();
+
+        copy_item_decor(target_item, source_item);
+
+        if let (Some(tt), Some(st)) = (target_item.as_table_mut(), source_item.as_table()) {
+            merge_decor_table(tt, st);
+        }
+
+        if let (Some(ta), Some(sa)) = (
+            target_item.as_array_of_tables_mut(),
+            source_item.as_array_of_tables(),
+        ) {
+            for (i, source_table) in sa.iter().enumerate() {
+                if let Some(target_table) = ta.get_mut(i) {
+                    copy_item_decor_table(target_table, source_table);
+                    merge_decor_table(target_table, source_table);
+                }
+            }
+        }
+    }
+}
+
+/// Copy the decor (comments and surrounding whitespace) from `source` to `target`,
+/// respecting the concrete item type since [`toml_edit::Item`] has no uniform
+/// `decor` accessor.
+fn copy_item_decor(target: &mut toml_edit::Item, source: &toml_edit::Item) {
+    match (target, source) {
+        (toml_edit::Item::Table(tt), toml_edit::Item::Table(st)) => {
+            *tt.decor_mut() = st.decor().clone();
+        }
+        (toml_edit::Item::Value(tv), toml_edit::Item::Value(sv)) => {
+            *tv.decor_mut() = sv.decor().clone();
+        }
+        _ => {}
+    }
+}
+
+fn copy_item_decor_table(target: &mut toml_edit::Table, source: &toml_edit::Table) {
+    *target.decor_mut() = source.decor().clone();
 }
 
 /// Process-wide default [`Secrets`] façade. The first caller wins; the
@@ -6013,6 +6112,7 @@ unix_socket_path = "/tmp/cw-hooks.sock"
                 ..ConfigToml::default()
             },
             permissions: PermissionsToml::default(),
+            original_raw: None,
         };
         store.save().expect("save");
 
@@ -6049,6 +6149,7 @@ unix_socket_path = "/tmp/cw-hooks.sock"
             path: path.clone(),
             config,
             permissions: PermissionsToml::default(),
+            original_raw: None,
         };
         store.save().expect("identical save should not rewrite");
 
@@ -6087,6 +6188,7 @@ unix_socket_path = "/tmp/cw-hooks.sock"
                 ..ConfigToml::default()
             },
             permissions: PermissionsToml::default(),
+            original_raw: None,
         };
         store.save().expect("changed save");
 
@@ -6099,6 +6201,121 @@ unix_socket_path = "/tmp/cw-hooks.sock"
         assert!(updated.contains("model = \"deepseek-v4-pro\""));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn config_store_save_preserves_comments() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join(CONFIG_FILE_NAME);
+        let original = "# my model\nmodel = \"deepseek-v4-flash\"\n# end comment\n";
+        fs::write(&config_path, original).expect("write config");
+
+        let mut store = ConfigStore::load(Some(config_path.clone())).expect("load config store");
+        store.config.model = Some("deepseek-v4-pro".to_string());
+        store.save().expect("save");
+
+        let body = fs::read_to_string(&config_path).expect("read config");
+        assert!(body.contains("# my model"), "prefix comment preserved");
+        assert!(body.contains("# end comment"), "suffix comment preserved");
+        assert!(body.contains("model = \"deepseek-v4-pro\""));
+    }
+
+    #[test]
+    fn config_store_save_preserves_disabled_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join(CONFIG_FILE_NAME);
+        fs::write(
+            &config_path,
+            "# my note\nmodel = \"deepseek-v4-flash\"\n# base_url = \"http://localhost:11434/v1\"\n",
+        )
+        .expect("write config");
+
+        let mut store = ConfigStore::load(Some(config_path.clone())).expect("load config store");
+        store.config.model = Some("deepseek-v4-pro".to_string());
+        store.save().expect("save");
+
+        let body = fs::read_to_string(&config_path).expect("read config");
+        assert!(
+            body.contains("# base_url = \"http://localhost:11434/v1\""),
+            "disabled key preserved as comment"
+        );
+        assert!(body.contains("model = \"deepseek-v4-pro\""));
+    }
+
+    #[test]
+    fn config_store_save_preserves_comments_with_other_keys() {
+        // Realistic scenario: user already has api_key + model, adds a comment,
+        // then changes model via `codewhale config set model`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join(CONFIG_FILE_NAME);
+        fs::write(
+            &config_path,
+            "# my deepseek key\napi_key = \"sk-1234\"\n\n# my current model\nmodel = \"deepseek-v4-flash\"\n",
+        )
+        .expect("write config");
+
+        let mut store = ConfigStore::load(Some(config_path.clone())).expect("load config store");
+        store.config.model = Some("deepseek-v4-pro".to_string());
+        store.save().expect("save");
+
+        let body = fs::read_to_string(&config_path).expect("read config");
+        assert!(body.contains("# my deepseek key"), "api_key comment lost");
+        assert!(body.contains("# my current model"), "model comment lost");
+        assert!(
+            body.contains("model = \"deepseek-v4-pro\""),
+            "new model not written"
+        );
+        assert!(body.contains("api_key = \"sk-1234\""), "api_key lost");
+    }
+
+    #[test]
+    fn merge_and_preserve_comments_returns_err_on_invalid_serialized() {
+        let err = merge_and_preserve_comments("{{{ not toml", "model = 1\n")
+            .expect_err("invalid serialized should fail");
+        assert!(
+            format!("{err:#}").contains("failed to parse serialized"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn merge_and_preserve_comments_returns_err_on_invalid_original() {
+        let err = merge_and_preserve_comments("model = 1\n", "{{{ not toml")
+            .expect_err("invalid original should fail");
+        assert!(
+            format!("{err:#}").contains("failed to parse original"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn config_store_save_falls_back_when_comment_merge_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join(CONFIG_FILE_NAME);
+        // Valid TOML so load succeeds, but the raw is corrupt so the merge
+        // will fail inside save() — save must still succeed and write the
+        // plain serialized config.
+        fs::write(&config_path, "model = \"deepseek-v4-flash\"\n").expect("write config");
+
+        // Bypass ConfigStore::load to inject a deliberately broken original_raw.
+        let store = ConfigStore {
+            path: config_path.clone(),
+            config: ConfigToml {
+                model: Some("deepseek-v4-pro".to_string()),
+                ..ConfigToml::default()
+            },
+            permissions: PermissionsToml::default(),
+            original_raw: Some("{ broken".to_string()),
+        };
+        store
+            .save()
+            .expect("save should succeed even when merge fails");
+
+        let body = fs::read_to_string(&config_path).expect("read config");
+        assert!(
+            body.contains("deepseek-v4-pro"),
+            "config should be written: {body}"
+        );
     }
 
     #[test]

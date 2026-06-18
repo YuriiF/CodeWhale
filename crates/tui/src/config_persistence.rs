@@ -17,13 +17,14 @@ pub(crate) fn persist_status_items(items: &[StatusItem]) -> anyhow::Result<PathB
             .with_context(|| format!("failed to create config directory {}", parent.display()))?;
     }
 
-    let mut doc: toml::Value = if path.exists() {
+    let (mut doc, original_raw) = if path.exists() {
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        toml::from_str(&raw)
-            .with_context(|| format!("failed to parse config at {}", path.display()))?
+        let doc: toml::Value = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config at {}", path.display()))?;
+        (doc, Some(raw))
     } else {
-        toml::Value::Table(toml::value::Table::new())
+        (toml::Value::Table(toml::value::Table::new()), None)
     };
 
     let table = doc
@@ -41,9 +42,13 @@ pub(crate) fn persist_status_items(items: &[StatusItem]) -> anyhow::Result<PathB
         .collect::<Vec<_>>();
     tui_table.insert("status_items".to_string(), toml::Value::Array(array));
 
-    let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
-    fs::write(&path, body)
-        .with_context(|| format!("failed to write config at {}", path.display()))?;
+    if let Some(raw) = original_raw {
+        save_toml_preserving_comments(&path, &doc, &raw)?;
+    } else {
+        let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
+        fs::write(&path, body)
+            .with_context(|| format!("failed to write config at {}", path.display()))?;
+    }
     Ok(path)
 }
 
@@ -61,21 +66,26 @@ pub(crate) fn persist_root_string_key(
             .with_context(|| format!("failed to create config directory {}", parent.display()))?;
     }
 
-    let mut doc: toml::Value = if path.exists() {
+    let (mut doc, original_raw) = if path.exists() {
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        toml::from_str(&raw)
-            .with_context(|| format!("failed to parse config at {}", path.display()))?
+        let doc: toml::Value = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config at {}", path.display()))?;
+        (doc, Some(raw))
     } else {
-        toml::Value::Table(toml::value::Table::new())
+        (toml::Value::Table(toml::value::Table::new()), None)
     };
     let table = doc
         .as_table_mut()
         .context("config.toml root must be a table")?;
     table.insert(key.to_string(), toml::Value::String(value.to_string()));
-    let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
-    fs::write(&path, body)
-        .with_context(|| format!("failed to write config at {}", path.display()))?;
+    if let Some(raw) = original_raw {
+        save_toml_preserving_comments(&path, &doc, &raw)?;
+    } else {
+        let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
+        fs::write(&path, body)
+            .with_context(|| format!("failed to write config at {}", path.display()))?;
+    }
     Ok(path)
 }
 
@@ -93,21 +103,26 @@ pub(crate) fn persist_root_bool_key(
             .with_context(|| format!("failed to create config directory {}", parent.display()))?;
     }
 
-    let mut doc: toml::Value = if path.exists() {
+    let (mut doc, original_raw) = if path.exists() {
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        toml::from_str(&raw)
-            .with_context(|| format!("failed to parse config at {}", path.display()))?
+        let doc: toml::Value = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config at {}", path.display()))?;
+        (doc, Some(raw))
     } else {
-        toml::Value::Table(toml::value::Table::new())
+        (toml::Value::Table(toml::value::Table::new()), None)
     };
     let table = doc
         .as_table_mut()
         .context("config.toml root must be a table")?;
     table.insert(key.to_string(), toml::Value::Boolean(value));
-    let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
-    fs::write(&path, body)
-        .with_context(|| format!("failed to write config at {}", path.display()))?;
+    if let Some(raw) = original_raw {
+        save_toml_preserving_comments(&path, &doc, &raw)?;
+    } else {
+        let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
+        fs::write(&path, body)
+            .with_context(|| format!("failed to write config at {}", path.display()))?;
+    }
     Ok(path)
 }
 
@@ -125,13 +140,14 @@ pub(crate) fn persist_tui_integer_key(
             .with_context(|| format!("failed to create config directory {}", parent.display()))?;
     }
 
-    let mut doc: toml::Value = if path.exists() {
+    let (mut doc, original_raw) = if path.exists() {
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        toml::from_str(&raw)
-            .with_context(|| format!("failed to parse config at {}", path.display()))?
+        let doc: toml::Value = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config at {}", path.display()))?;
+        (doc, Some(raw))
     } else {
-        toml::Value::Table(toml::value::Table::new())
+        (toml::Value::Table(toml::value::Table::new()), None)
     };
     let table = doc
         .as_table_mut()
@@ -144,9 +160,13 @@ pub(crate) fn persist_tui_integer_key(
         .context("`tui` section in config.toml must be a table")?;
     let value = i64::try_from(value).context("integer value is too large for TOML")?;
     tui_table.insert(key.to_string(), toml::Value::Integer(value));
-    let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
-    fs::write(&path, body)
-        .with_context(|| format!("failed to write config at {}", path.display()))?;
+    if let Some(raw) = original_raw {
+        save_toml_preserving_comments(&path, &doc, &raw)?;
+    } else {
+        let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
+        fs::write(&path, body)
+            .with_context(|| format!("failed to write config at {}", path.display()))?;
+    }
     Ok(path)
 }
 
@@ -164,13 +184,14 @@ pub(crate) fn persist_provider_base_url_key(
             .with_context(|| format!("failed to create config directory {}", parent.display()))?;
     }
 
-    let mut doc: toml::Value = if path.exists() {
+    let (mut doc, original_raw) = if path.exists() {
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        toml::from_str(&raw)
-            .with_context(|| format!("failed to parse config at {}", path.display()))?
+        let doc: toml::Value = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config at {}", path.display()))?;
+        (doc, Some(raw))
     } else {
-        toml::Value::Table(toml::value::Table::new())
+        (toml::Value::Table(toml::value::Table::new()), None)
     };
     let table = doc
         .as_table_mut()
@@ -191,9 +212,13 @@ pub(crate) fn persist_provider_base_url_key(
         toml::Value::String(value.to_string()),
     );
 
-    let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
-    fs::write(&path, body)
-        .with_context(|| format!("failed to write config at {}", path.display()))?;
+    if let Some(raw) = original_raw {
+        save_toml_preserving_comments(&path, &doc, &raw)?;
+    } else {
+        let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
+        fs::write(&path, body)
+            .with_context(|| format!("failed to write config at {}", path.display()))?;
+    }
     Ok(path)
 }
 
@@ -257,6 +282,25 @@ pub(crate) fn config_toml_path(config_path: Option<&Path>) -> anyhow::Result<Pat
         return Ok(legacy);
     }
     Ok(primary)
+}
+
+/// Write `doc` to `path`, merging comments from `original_raw` so user
+/// annotations survive the rewrite.
+fn save_toml_preserving_comments(
+    path: &Path,
+    doc: &toml::Value,
+    original_raw: &str,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let serialized = toml::to_string_pretty(doc).context("failed to serialize config.toml")?;
+    let body = codewhale_config::merge_and_preserve_comments(&serialized, original_raw)
+        .unwrap_or_else(|e| {
+            tracing::warn!("failed to merge config comments, saving without them: {e:#}");
+            serialized
+        });
+    std::fs::write(path, body)
+        .with_context(|| format!("failed to write config at {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -463,6 +507,34 @@ mod tests {
         assert!(
             body.contains("status_items"),
             "expected status_items in {body}"
+        );
+    }
+
+    #[test]
+    fn persist_bool_key_preserves_comments() {
+        let temp_root = temp_root("codewhale-persist-comments");
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+
+        let path = temp_root.join(".deepseek").join("config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "# my note\nmodel = \"deepseek-v4-flash\"\n# disabled = true\n",
+        )
+        .unwrap();
+
+        let written = persist_root_bool_key(Some(&path), "allow_shell", true)
+            .expect("persist should succeed");
+        let body = fs::read_to_string(&written).expect("written file should be readable");
+        assert!(body.contains("# my note"), "prefix comment lost: {body}");
+        assert!(
+            body.contains("# disabled = true"),
+            "disabled key lost: {body}"
+        );
+        assert!(
+            body.contains("allow_shell = true"),
+            "new key not written: {body}"
         );
     }
 }

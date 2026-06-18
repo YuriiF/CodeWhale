@@ -2059,6 +2059,33 @@ impl App {
         } = options;
 
         let settings = Settings::load().unwrap_or_else(|_| Settings::default());
+
+        // If settings.toml exists on disk but couldn't be parsed (we fell back
+        // to defaults), surface a warning in the TUI so the user knows their
+        // file is broken instead of silently losing all settings.
+        let settings_parse_warning = crate::settings::Settings::path().ok().and_then(|p| {
+            if p.exists() {
+                std::fs::read_to_string(&p).ok().and_then(|raw| {
+                    ::toml::from_str::<::toml::Value>(&raw)
+                        .err()
+                        .map(|e| format!("⚠ settings.toml is malformed — using defaults ({e})"))
+                })
+            } else {
+                None
+            }
+        });
+        let tui_prefs_warning = crate::settings::TuiPrefs::path().ok().and_then(|p| {
+            if p.exists() {
+                std::fs::read_to_string(&p).ok().and_then(|raw| {
+                    ::toml::from_str::<::toml::Value>(&raw)
+                        .err()
+                        .map(|e| format!("⚠ tui.toml is malformed — using defaults ({e})"))
+                })
+            } else {
+                None
+            }
+        });
+
         let mut provider = config.api_provider();
 
         // Let settings preserve runtime switches only when config/CLI did not
@@ -2287,7 +2314,9 @@ impl App {
             prompt_suggestion_gen: std::sync::atomic::AtomicU64::new(0),
             offline_mode: false,
             turn_error_posted: false,
-            status_message: None,
+            // Surface parse warnings so the user knows their config file is
+            // broken instead of silently losing all settings.
+            status_message: settings_parse_warning.or(tui_prefs_warning),
             status_toasts: VecDeque::new(),
             sticky_status: None,
             last_status_message_seen: None,

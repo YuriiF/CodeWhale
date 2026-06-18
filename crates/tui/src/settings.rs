@@ -134,8 +134,13 @@ impl TuiPrefs {
         }
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read tui.toml from {}", path.display()))?;
-        let prefs: TuiPrefs = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse tui.toml from {}", path.display()))?;
+        let prefs: TuiPrefs = match toml::from_str(&content) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("Failed to parse {} (using defaults): {e:#}", path.display());
+                return Ok(Self::default());
+            }
+        };
         Ok(prefs)
     }
 
@@ -148,8 +153,18 @@ impl TuiPrefs {
                 format!("Failed to create config directory {}", parent.display())
             })?;
         }
-        let content = toml::to_string_pretty(self).context("Failed to serialize TuiPrefs")?;
-        std::fs::write(&path, content)
+        let serialized = toml::to_string_pretty(self).context("Failed to serialize TuiPrefs")?;
+        let body = if path.exists() {
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read tui.toml at {}", path.display()))?;
+            codewhale_config::merge_and_preserve_comments(&serialized, &raw).unwrap_or_else(|e| {
+                tracing::warn!("failed to merge tui.toml comments, saving without them: {e:#}");
+                serialized
+            })
+        } else {
+            serialized
+        };
+        std::fs::write(&path, body)
             .with_context(|| format!("Failed to write tui.toml to {}", path.display()))?;
         Ok(())
     }
@@ -398,9 +413,16 @@ impl Settings {
         } else {
             let content = std::fs::read_to_string(&read_path)
                 .with_context(|| format!("Failed to read settings from {}", read_path.display()))?;
-            let mut s: Settings = toml::from_str(&content).with_context(|| {
-                format!("Failed to parse settings from {}", read_path.display())
-            })?;
+            let mut s: Settings = match toml::from_str(&content) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to parse {} (using defaults): {e:#}",
+                        read_path.display()
+                    );
+                    return Ok(Self::default());
+                }
+            };
             s.default_mode = normalize_mode(&s.default_mode).to_string();
             s.composer_density = normalize_composer_density(&s.composer_density).to_string();
             s.transcript_spacing = normalize_transcript_spacing(&s.transcript_spacing).to_string();
@@ -549,8 +571,18 @@ impl Settings {
             })?;
         }
 
-        let content = toml::to_string_pretty(self).context("Failed to serialize settings")?;
-        std::fs::write(&path, content)
+        let serialized = toml::to_string_pretty(self).context("Failed to serialize settings")?;
+        let body = if path.exists() {
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read settings at {}", path.display()))?;
+            codewhale_config::merge_and_preserve_comments(&serialized, &raw).unwrap_or_else(|e| {
+                tracing::warn!("failed to merge settings comments, saving without them: {e:#}");
+                serialized
+            })
+        } else {
+            serialized
+        };
+        std::fs::write(&path, body)
             .with_context(|| format!("Failed to write settings to {}", path.display()))?;
         Ok(())
     }
@@ -2749,6 +2781,79 @@ mod tests {
         assert_eq!(loaded.theme, "light");
         assert_eq!(loaded.font_size, 14);
         assert_eq!(loaded.keybinds.submit.as_deref(), Some("ctrl+enter"));
+
+        // SAFETY: cleanup under the guard.
+        unsafe {
+            std::env::remove_var("DEEPSEEK_CONFIG_PATH");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn tui_prefs_save_preserves_comments() {
+        let _g = config_path_test_guard();
+        let tmp = std::env::temp_dir().join("dst_tui_prefs_comment_test");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let config_file = tmp.join("config.toml");
+        // SAFETY: test-only env mutation guarded by config_path_test_guard.
+        unsafe {
+            std::env::set_var("DEEPSEEK_CONFIG_PATH", config_file.to_str().unwrap());
+        }
+
+        // tui.toml lives next to config.toml
+        let tui_path = tmp.join("tui.toml");
+        std::fs::write(
+            &tui_path,
+            "# my theme comment\ntheme = \"dark\"\n# footer note\n",
+        )
+        .unwrap();
+
+        let prefs = TuiPrefs {
+            theme: "light".to_string(),
+            ..TuiPrefs::default()
+        };
+        prefs.save().expect("save should succeed");
+
+        let body = std::fs::read_to_string(&tui_path).expect("read tui.toml");
+        assert!(body.contains("# my theme comment"), "comment lost: {body}");
+        assert!(body.contains("# footer note"), "footer lost: {body}");
+        assert!(body.contains("light"), "new value not written: {body}");
+
+        // SAFETY: cleanup under the guard.
+        unsafe {
+            std::env::remove_var("DEEPSEEK_CONFIG_PATH");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn settings_save_preserves_comments() {
+        let _g = config_path_test_guard();
+        let tmp = std::env::temp_dir().join("dst_settings_comment_test");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let config_file = tmp.join("config.toml");
+        // SAFETY: test-only env mutation guarded by config_path_test_guard.
+        unsafe {
+            std::env::set_var("DEEPSEEK_CONFIG_PATH", config_file.to_str().unwrap());
+        }
+
+        // settings.toml lives next to config.toml
+        let settings_path = tmp.join("settings.toml");
+        std::fs::write(
+            &settings_path,
+            "# my setting\ncost_currency = \"usd\"\n# trailing\n",
+        )
+        .unwrap();
+
+        // Load the existing file so we have a real struct to modify.
+        let mut settings = Settings::load().expect("load settings");
+        settings.cost_currency = "cny".to_string();
+        settings.save().expect("save should succeed");
+
+        let body = std::fs::read_to_string(&settings_path).expect("read settings.toml");
+        assert!(body.contains("# my setting"), "comment lost: {body}");
+        assert!(body.contains("# trailing"), "trailing lost: {body}");
+        assert!(body.contains("cny"), "new value not written: {body}");
 
         // SAFETY: cleanup under the guard.
         unsafe {
