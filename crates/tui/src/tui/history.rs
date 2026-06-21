@@ -21,6 +21,7 @@ use crate::tui::ui_text::CopyLineSeparator;
 mod agent_activity;
 mod archived_context;
 mod checklist;
+mod constants;
 mod plan;
 mod thinking;
 mod tool_run;
@@ -33,6 +34,12 @@ use checklist::{
 
 #[cfg(test)]
 use checklist::{ChecklistChange, ChecklistItemSnapshot, ChecklistSnapshot};
+use constants::{
+    ASSISTANT_GLYPH, TOOL_CARD_SUMMARY_LINES, TOOL_COMMAND_LINE_LIMIT, TOOL_DONE_SYMBOL,
+    TOOL_FAILED_SYMBOL, TOOL_HEADER_SUMMARY_LIMIT, TOOL_OUTPUT_HEAD_LINES, TOOL_OUTPUT_LINE_LIMIT,
+    TOOL_OUTPUT_TAIL_LINES, TOOL_RUNNING_SYMBOLS, TOOL_STATUS_SYMBOL_MS, TOOL_TEXT_LIMIT,
+    TRANSCRIPT_RAIL, USER_GLYPH,
+};
 use thinking::{render_hidden_thinking_activity, render_thinking};
 
 #[cfg(test)]
@@ -47,35 +54,7 @@ pub use tool_run::{
 #[cfg(test)]
 use thinking::{REASONING_CURSOR, REASONING_OPENER, REASONING_RAIL};
 
-// === Constants ===
-
 use std::process::Command;
-const TOOL_COMMAND_LINE_LIMIT: usize = 3;
-const TOOL_OUTPUT_LINE_LIMIT: usize = 6;
-const TOOL_TEXT_LIMIT: usize = 300;
-const TOOL_HEADER_SUMMARY_LIMIT: usize = 56;
-const TOOL_OUTPUT_HEAD_LINES: usize = 2;
-const TOOL_OUTPUT_TAIL_LINES: usize = 2;
-const TOOL_RUNNING_SYMBOLS: [&str; 10] = [
-    "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}",
-    "\u{2807}", "\u{280F}",
-];
-/// Per-glyph cadence: 100 ms — visibly alive without exceeding the redraw cap.
-const TOOL_STATUS_SYMBOL_MS: u64 = 100;
-/// Visual marker for the user role at the start of their message line. Solid
-/// vertical bar — no animation; user input is a finished thing.
-const USER_GLYPH: &str = "\u{258E}"; // ▎
-/// Visual marker for the assistant role. Solid bullet that pulses at 2s
-/// cycle while the response is streaming, holds full brightness when idle.
-const ASSISTANT_GLYPH: &str = "\u{25CF}"; // ●
-/// Transcript body left rail. Solid 1/8 block (`▏`) followed by a space —
-/// used as a visual left-margin anchor for continuation lines, tool-card
-/// detail rows, and affordance lines. Dimmed so it guides the eye without
-/// competing with content.
-const TRANSCRIPT_RAIL: &str = "\u{258F} "; // ▏ + space
-const TOOL_CARD_SUMMARY_LINES: usize = 4;
-const TOOL_DONE_SYMBOL: &str = "•";
-const TOOL_FAILED_SYMBOL: &str = "•";
 
 /// Render mode controlling whether tool/thinking cells render their compact
 /// "live" form (with caps and collapsed reasoning) or their full transcript
