@@ -2386,6 +2386,11 @@ impl RuntimeThreadManager {
             .lsp
             .clone()
             .map(crate::config::LspConfigToml::into_runtime);
+        let provider = self.config.api_provider();
+        let max_subagents = self
+            .config
+            .max_subagents_for_provider(provider)
+            .clamp(1, MAX_SUBAGENTS);
         let engine_cfg = EngineConfig {
             model: thread.model.clone(),
             workspace: thread.workspace.clone(),
@@ -2405,17 +2410,20 @@ impl RuntimeThreadManager {
             translation_enabled: false,
             show_thinking: settings.show_thinking,
             max_steps: 100,
-            max_subagents: self.config.max_subagents().clamp(1, MAX_SUBAGENTS),
-            max_admitted_subagents: self.config.max_admitted_subagents(),
-            launch_concurrency: self.config.launch_concurrency(),
-            subagents_enabled: self.config.subagents_enabled(),
+            max_subagents,
+            max_admitted_subagents: self
+                .config
+                .max_admitted_subagents_for_provider(provider)
+                .max(max_subagents),
+            launch_concurrency: self.config.launch_concurrency_for_provider(provider),
+            subagents_enabled: self.config.subagents_enabled_for_provider(provider),
             features: self.config.features(),
             compaction,
             todos: new_shared_todo_list(),
             plan_state: new_shared_plan_state(),
             goal_state: crate::tools::goal::new_shared_goal_state(),
-            max_spawn_depth: self.config.subagent_max_spawn_depth(),
-            subagent_token_budget: self.config.subagent_token_budget(),
+            max_spawn_depth: self.config.subagent_max_spawn_depth_for_provider(provider),
+            subagent_token_budget: self.config.subagent_token_budget_for_provider(provider),
             network_policy,
             snapshots_enabled: self.config.snapshots_config().enabled,
             snapshots_max_workspace_bytes: self
@@ -2438,13 +2446,14 @@ impl RuntimeThreadManager {
             },
             subagent_model_overrides: self.config.subagent_model_overrides(),
             subagent_api_timeout: std::time::Duration::from_secs(
-                self.config.subagent_api_timeout_secs(),
+                self.config.subagent_api_timeout_secs_for_provider(provider),
             ),
             stream_chunk_timeout: std::time::Duration::from_secs(
                 self.config.stream_chunk_timeout_secs(),
             ),
             subagent_heartbeat_timeout: std::time::Duration::from_secs(
-                self.config.subagent_heartbeat_timeout_secs(),
+                self.config
+                    .subagent_heartbeat_timeout_secs_for_provider(provider),
             ),
             prefer_bwrap: self.config.prefer_bwrap.unwrap_or(false),
             memory_enabled: self.config.memory_enabled(),

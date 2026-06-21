@@ -1259,7 +1259,7 @@ fn config_hint_for_key(key: &str) -> &'static str {
         }
         "mcp_config_path" => "path to mcp.json",
         "fleet.exec.max_spawn_depth" => {
-            "0 blocks child agents; 3 default (same axis as sub-agents); capped at 3"
+            "0 blocks child agents; 3 default (same axis as sub-agents); capped at 8"
         }
         _ => "",
     }

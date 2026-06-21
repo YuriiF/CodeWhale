@@ -739,6 +739,19 @@ fn get_provider_config_value(
     }
 }
 
+fn get_provider_config_display_value(
+    config: &ProviderConfigToml,
+    field: ProviderConfigField,
+) -> Option<String> {
+    match field {
+        ProviderConfigField::ApiKey => config.api_key.as_deref().map(redact_secret),
+        ProviderConfigField::HttpHeaders => {
+            serialize_http_headers_for_display(&config.http_headers)
+        }
+        _ => get_provider_config_value(config, field),
+    }
+}
+
 fn set_provider_config_value(
     config: &mut ConfigToml,
     provider: ProviderKind,
@@ -886,7 +899,7 @@ fn insert_provider_config_values(
             v.to_string(),
         );
     }
-    if let Some(v) = serialize_http_headers(&config.http_headers) {
+    if let Some(v) = serialize_http_headers_for_display(&config.http_headers) {
         out.insert(
             provider_config_key(provider, ProviderConfigField::HttpHeaders),
             v,
@@ -1327,7 +1340,7 @@ pub struct FleetConfigToml {
 /// workers so the two cannot drift into "two moving targets":
 /// - [`DEFAULT_SPAWN_DEPTH`] is the default recursion budget (the sub-agent
 ///   runtime's `DEFAULT_MAX_SPAWN_DEPTH` is defined as this value).
-/// - [`MAX_SPAWN_DEPTH_CEILING`] is the hard safety cap; every configured
+/// - [`MAX_SPAWN_DEPTH_CEILING`] is the opt-in safety cap; every configured
 ///   value (fleet `max_spawn_depth`, the `agent` tool's `max_depth`) clamps to it.
 ///
 /// A worker runs at `spawn_depth = 0` and may spawn while
@@ -1337,10 +1350,12 @@ pub struct FleetConfigToml {
 /// depth 0 even when the budget is 0.
 pub const DEFAULT_SPAWN_DEPTH: u32 = 3;
 
-/// Hard ceiling on recursion depth for any worker/sub-agent. See
-/// [`DEFAULT_SPAWN_DEPTH`]. Raising this single constant lifts the limit
-/// everywhere (the fleet clamp and `agent` validation both read it).
-pub const MAX_SPAWN_DEPTH_CEILING: u32 = 3;
+/// Hard ceiling on recursion depth for any worker/sub-agent. The default stays
+/// conservative at [`DEFAULT_SPAWN_DEPTH`], while explicit config can opt into
+/// deeper trees for direct-API providers that can tolerate the fanout.
+/// Raising this single constant lifts the limit everywhere (the fleet clamp
+/// and `agent` validation both read it).
+pub const MAX_SPAWN_DEPTH_CEILING: u32 = 8;
 
 /// Headless worker execution constraints (#3027).
 ///
@@ -1661,6 +1676,18 @@ impl ConfigToml {
 
     #[must_use]
     pub fn get_display_value(&self, key: &str) -> Option<String> {
+        if let Some((provider, field)) = parse_provider_config_key(key) {
+            return get_provider_config_display_value(self.providers.for_provider(provider), field);
+        }
+
+        if key == "http_headers" {
+            return serialize_http_headers_for_display(&self.http_headers);
+        }
+
+        if let Some(value) = self.extras.get(key) {
+            return Some(redact_toml_value_for_display(key, value));
+        }
+
         self.get_value(key).map(|value| {
             if is_sensitive_config_key(key) {
                 redact_secret(&value)
@@ -1754,7 +1781,7 @@ impl ConfigToml {
         if let Some(v) = self.base_url.as_ref() {
             out.insert("base_url".to_string(), v.clone());
         }
-        if let Some(v) = serialize_http_headers(&self.http_headers) {
+        if let Some(v) = serialize_http_headers_for_display(&self.http_headers) {
             out.insert("http_headers".to_string(), v);
         }
         if let Some(v) = self.default_text_model.as_ref() {
@@ -1804,7 +1831,7 @@ impl ConfigToml {
         }
 
         for (k, v) in &self.extras {
-            out.insert(k.clone(), v.to_string());
+            out.insert(k.clone(), redact_toml_value_for_display(k, v));
         }
         out
     }
@@ -3631,6 +3658,26 @@ fn serialize_http_headers(headers: &BTreeMap<String, String>) -> Option<String> 
     )
 }
 
+fn serialize_http_headers_for_display(headers: &BTreeMap<String, String>) -> Option<String> {
+    if headers.is_empty() {
+        return None;
+    }
+    Some(
+        headers
+            .iter()
+            .map(|(name, value)| {
+                let display_value = if is_sensitive_config_key(name) {
+                    redact_secret(value)
+                } else {
+                    value.clone()
+                };
+                format!("{name}={display_value}")
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
 fn redact_secret(secret: &str) -> String {
     let chars: Vec<char> = secret.chars().collect();
     if chars.len() <= 16 {
@@ -3650,7 +3697,78 @@ fn redact_secret(secret: &str) -> String {
 
 #[must_use]
 pub fn is_sensitive_config_key(key: &str) -> bool {
-    key == "api_key" || key.ends_with(".api_key")
+    let Some(segment) = key.rsplit('.').next() else {
+        return false;
+    };
+    let normalized = segment
+        .trim()
+        .trim_matches('"')
+        .replace('-', "_")
+        .to_ascii_lowercase();
+
+    matches!(
+        normalized.as_str(),
+        "api_key"
+            | "apikey"
+            | "api_keys"
+            | "authorization"
+            | "bearer"
+            | "client_secret"
+            | "credential"
+            | "credentials"
+            | "id_token"
+            | "password"
+            | "passwords"
+            | "passwd"
+            | "proxy_authorization"
+            | "refresh_token"
+            | "secret"
+            | "secrets"
+            | "token"
+            | "tokens"
+    ) || normalized.ends_with("_api_key")
+        || normalized.ends_with("_authorization")
+        || normalized.ends_with("_password")
+        || normalized.ends_with("_secret")
+        || normalized.ends_with("_token")
+}
+
+fn redact_toml_value_for_display(key: &str, value: &toml::Value) -> String {
+    redact_toml_value_for_display_inner(key, false, value).to_string()
+}
+
+fn redact_toml_value_for_display_inner(
+    key: &str,
+    sensitive_ancestor: bool,
+    value: &toml::Value,
+) -> toml::Value {
+    let sensitive = sensitive_ancestor || is_sensitive_config_key(key);
+    match value {
+        toml::Value::String(value) if sensitive => toml::Value::String(redact_secret(value)),
+        toml::Value::Array(values) => toml::Value::Array(
+            values
+                .iter()
+                .map(|value| redact_toml_value_for_display_inner(key, sensitive, value))
+                .collect(),
+        ),
+        toml::Value::Table(table) => {
+            let mut redacted = toml::map::Map::new();
+            for (child_key, child_value) in table {
+                let path = if key.is_empty() {
+                    child_key.clone()
+                } else {
+                    format!("{key}.{child_key}")
+                };
+                redacted.insert(
+                    child_key.clone(),
+                    redact_toml_value_for_display_inner(&path, sensitive, child_value),
+                );
+            }
+            toml::Value::Table(redacted)
+        }
+        _ if sensitive => toml::Value::String("********".to_string()),
+        _ => value.clone(),
+    }
 }
 
 fn normalize_config_file_path(path: PathBuf) -> Result<PathBuf> {
@@ -5202,6 +5320,77 @@ command = "cargo check"
             config.get_display_value("model").as_deref(),
             Some("deepseek-v4-pro")
         );
+    }
+
+    #[test]
+    fn config_display_redacts_nested_extra_secrets() {
+        let mut config = ConfigToml::default();
+        let mut profile = toml::map::Map::new();
+        profile.insert(
+            "chatgpt_access_token".to_string(),
+            toml::Value::String("raw-chatgpt-access-token-value".to_string()),
+        );
+        profile.insert(
+            "safe_label".to_string(),
+            toml::Value::String("visible".to_string()),
+        );
+
+        let mut nested = toml::map::Map::new();
+        nested.insert(
+            "refresh_token".to_string(),
+            toml::Value::String("raw-refresh-token-value".to_string()),
+        );
+        nested.insert("expires_at".to_string(), toml::Value::Integer(1234));
+        profile.insert("session".to_string(), toml::Value::Table(nested));
+
+        config
+            .extras
+            .insert("extras".to_string(), toml::Value::Table(profile));
+
+        let listed = config.list_values();
+        let rendered = listed.get("extras").expect("extras are listed");
+
+        assert!(rendered.contains("chatgpt_access_token"));
+        assert!(rendered.contains("refresh_token"));
+        assert!(rendered.contains("safe_label = \"visible\""));
+        assert!(!rendered.contains("raw-chatgpt-access-token-value"));
+        assert!(!rendered.contains("raw-refresh-token-value"));
+
+        let display = config
+            .get_display_value("extras")
+            .expect("extras display value");
+        assert!(!display.contains("raw-chatgpt-access-token-value"));
+        assert!(!display.contains("raw-refresh-token-value"));
+    }
+
+    #[test]
+    fn config_display_redacts_sensitive_extra_leaf_keys_and_headers() {
+        let mut config = ConfigToml::default();
+        config.extras.insert(
+            "chatgpt_access_token".to_string(),
+            toml::Value::String("raw-chatgpt-token-value".to_string()),
+        );
+        config.http_headers.insert(
+            "Authorization".to_string(),
+            "Bearer raw-header-token".to_string(),
+        );
+        config
+            .http_headers
+            .insert("X-Test".to_string(), "ok".to_string());
+
+        assert_eq!(
+            config.get_display_value("chatgpt_access_token").as_deref(),
+            Some("\"raw-***alue\"")
+        );
+
+        let headers = config
+            .list_values()
+            .get("http_headers")
+            .expect("headers are listed")
+            .clone();
+        assert!(headers.contains("Authorization=Bear***oken"));
+        assert!(headers.contains("X-Test=ok"));
+        assert!(!headers.contains("raw-header-token"));
     }
 
     #[test]

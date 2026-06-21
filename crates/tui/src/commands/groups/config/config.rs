@@ -21,6 +21,7 @@ use crate::tui::app::{
     App, AppAction, AppMode, OnboardingState, ReasoningEffort, SidebarFocus, VimMode,
 };
 use crate::tui::approval::ApprovalMode;
+use crate::tui::ui::{SidebarRenderState, sidebar_render_state};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -334,7 +335,7 @@ pub fn verbose(app: &mut App, arg: Option<&str>) -> CommandResult {
 
 /// Toggle or focus the right sidebar.
 ///
-/// Bare `/sidebar` toggles between hidden and auto. Explicit values mirror
+/// Bare `/sidebar` toggles between hidden and pinned. Explicit values mirror
 /// `sidebar_focus` so users have a discoverable copy-friendly path that does
 /// not depend on terminal-specific key translations.
 pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
@@ -348,28 +349,28 @@ pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
     let target = match tokens.as_slice() {
         [] | ["toggle"] => {
             if app.sidebar_focus == SidebarFocus::Hidden {
-                SidebarFocus::Auto
+                SidebarFocus::Pinned
             } else {
                 SidebarFocus::Hidden
             }
         }
         [value] => match value.to_ascii_lowercase().as_str() {
-            "on" | "show" | "visible" => SidebarFocus::Auto,
+            "on" | "show" | "visible" | "pinned" => SidebarFocus::Pinned,
             "off" | "hide" | "hidden" | "closed" | "none" => SidebarFocus::Hidden,
             "auto" => SidebarFocus::Auto,
-            "work" | "plan" | "todos" => SidebarFocus::Work,
+            "work" | "plan" | "todos" => SidebarFocus::Pinned,
             "tasks" => SidebarFocus::Tasks,
             "agents" | "subagents" | "sub-agents" => SidebarFocus::Agents,
             "context" | "session" => SidebarFocus::Context,
             _ => {
                 return CommandResult::error(
-                    "Usage: /sidebar [on|off|auto|work|tasks|agents|context] [--save]",
+                    "Usage: /sidebar [on|off|pinned|auto|tasks|agents|context] [--save]",
                 );
             }
         },
         _ => {
             return CommandResult::error(
-                "Usage: /sidebar [on|off|auto|work|tasks|agents|context] [--save]",
+                "Usage: /sidebar [on|off|pinned|auto|tasks|agents|context] [--save]",
             );
         }
     };
@@ -384,15 +385,23 @@ pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
     }
 
     app.needs_redraw = true;
-    let message = sidebar_status_message(target).to_string();
+    let message = sidebar_status_message(app);
     CommandResult::message(message)
 }
 
-fn sidebar_status_message(focus: SidebarFocus) -> &'static str {
-    if focus == SidebarFocus::Hidden {
-        "Sidebar is hidden"
-    } else {
-        "Sidebar is visible"
+fn sidebar_status_message(app: &mut App) -> String {
+    match sidebar_render_state(app) {
+        SidebarRenderState::Hidden => "Sidebar is hidden".to_string(),
+        SidebarRenderState::SuppressedByWidth {
+            available_width,
+            min_width,
+        } => format!(
+            "Sidebar is on, but hidden because the terminal is too narrow ({available_width} cols; needs at least {min_width})"
+        ),
+        SidebarRenderState::AutoCollapsed => {
+            "Sidebar auto mode is on, but currently collapsed while idle".to_string()
+        }
+        SidebarRenderState::Visible => "Sidebar is visible".to_string(),
     }
 }
 
@@ -478,7 +487,9 @@ fn subagents_status(app: &App) -> CommandResult {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "(unresolved)".to_string());
     let disabled_reason = config.subagents_disabled_reason();
+    let active_provider = app.api_provider;
     let subagents = config.subagents.as_ref();
+    let provider_subagents = config.subagent_provider_config(active_provider);
     let explicit_enabled = subagents.and_then(|cfg| cfg.enabled);
     let raw_max_concurrent = subagents.and_then(|cfg| cfg.max_concurrent);
     let raw_max_depth = subagents.and_then(|cfg| cfg.max_depth);
@@ -494,36 +505,81 @@ fn subagents_status(app: &App) -> CommandResult {
     ));
     lines.push(format!("Config path: {path}"));
     lines.push(format!(
+        "Active provider: {} ({})",
+        active_provider.as_str(),
+        active_provider.display_name()
+    ));
+    lines.push(format!(
         "subagents.enabled = {}",
         explicit_enabled
             .map(|value| value.to_string())
             .unwrap_or_else(|| "default true".to_string())
     ));
     lines.push(format!(
-        "subagents.max_concurrent = {} (resolved {})",
+        "subagents.max_concurrent = {} (resolved global {}; active provider {})",
         option_display(raw_max_concurrent),
-        config.max_subagents()
+        config.max_subagents(),
+        config.max_subagents_for_provider(active_provider)
     ));
     lines.push(format!(
-        "subagents.max_depth = {} (resolved {})",
+        "subagents.max_depth = {} (resolved global {}; active provider {})",
         option_display(raw_max_depth),
-        config.subagent_max_spawn_depth()
+        config.subagent_max_spawn_depth(),
+        config.subagent_max_spawn_depth_for_provider(active_provider)
     ));
     lines.push(format!(
-        "subagents.launch_concurrency = {} (resolved {})",
+        "subagents.launch_concurrency = {} (resolved global {}; active provider {})",
         option_display(raw_launch),
-        config.launch_concurrency()
+        config.launch_concurrency(),
+        config.launch_concurrency_for_provider(active_provider)
     ));
     lines.push(format!(
-        "subagents.api_timeout_secs = {} (resolved {})",
+        "subagents.api_timeout_secs = {} (resolved global {}; active provider {})",
         option_display(raw_api),
-        config.subagent_api_timeout_secs()
+        config.subagent_api_timeout_secs(),
+        config.subagent_api_timeout_secs_for_provider(active_provider)
     ));
     lines.push(format!(
-        "subagents.heartbeat_timeout_secs = {} (resolved {})",
+        "subagents.heartbeat_timeout_secs = {} (resolved global {}; active provider {})",
         option_display(raw_heartbeat),
-        config.subagent_heartbeat_timeout_secs()
+        config.subagent_heartbeat_timeout_secs(),
+        config.subagent_heartbeat_timeout_secs_for_provider(active_provider)
     ));
+    if let Some(provider_subagents) = provider_subagents {
+        lines.push(format!(
+            "subagents.providers.{}.enabled = {}",
+            active_provider.as_str(),
+            provider_subagents
+                .enabled
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "inherits".to_string())
+        ));
+        lines.push(format!(
+            "subagents.providers.{}.max_concurrent = {}",
+            active_provider.as_str(),
+            option_display(provider_subagents.max_concurrent)
+        ));
+        lines.push(format!(
+            "subagents.providers.{}.max_depth = {}",
+            active_provider.as_str(),
+            option_display(provider_subagents.max_depth)
+        ));
+        lines.push(format!(
+            "subagents.providers.{}.launch_concurrency = {}",
+            active_provider.as_str(),
+            option_display(provider_subagents.launch_concurrency)
+        ));
+        lines.push(format!(
+            "subagents.providers.{}.max_admitted = {}",
+            active_provider.as_str(),
+            option_display(provider_subagents.max_admitted)
+        ));
+    } else {
+        lines.push(format!(
+            "subagents.providers.{} = inherits global",
+            active_provider.as_str()
+        ));
+    }
     CommandResult::message(lines.join("\n"))
 }
 
@@ -537,6 +593,7 @@ fn show_subagents_setting(app: &App, key: &str) -> CommandResult {
             "Unknown subagents setting '{key}'. Use `/config subagents status`."
         ));
     };
+    let active_provider = app.api_provider;
     let subagents = config.subagents.as_ref();
     let value = match key {
         "enabled" => subagents
@@ -544,29 +601,34 @@ fn show_subagents_setting(app: &App, key: &str) -> CommandResult {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "default true".to_string()),
         "max_concurrent" => format!(
-            "{} (resolved {})",
+            "{} (resolved global {}; active provider {})",
             option_display(subagents.and_then(|cfg| cfg.max_concurrent)),
-            config.max_subagents()
+            config.max_subagents(),
+            config.max_subagents_for_provider(active_provider)
         ),
         "max_depth" => format!(
-            "{} (resolved {})",
+            "{} (resolved global {}; active provider {})",
             option_display(subagents.and_then(|cfg| cfg.max_depth)),
-            config.subagent_max_spawn_depth()
+            config.subagent_max_spawn_depth(),
+            config.subagent_max_spawn_depth_for_provider(active_provider)
         ),
         "launch_concurrency" => format!(
-            "{} (resolved {})",
+            "{} (resolved global {}; active provider {})",
             option_display(subagents.and_then(|cfg| cfg.launch_concurrency)),
-            config.launch_concurrency()
+            config.launch_concurrency(),
+            config.launch_concurrency_for_provider(active_provider)
         ),
         "api_timeout_secs" => format!(
-            "{} (resolved {})",
+            "{} (resolved global {}; active provider {})",
             option_display(subagents.and_then(|cfg| cfg.api_timeout_secs)),
-            config.subagent_api_timeout_secs()
+            config.subagent_api_timeout_secs(),
+            config.subagent_api_timeout_secs_for_provider(active_provider)
         ),
         "heartbeat_timeout_secs" => format!(
-            "{} (resolved {})",
+            "{} (resolved global {}; active provider {})",
             option_display(subagents.and_then(|cfg| cfg.heartbeat_timeout_secs)),
-            config.subagent_heartbeat_timeout_secs()
+            config.subagent_heartbeat_timeout_secs(),
+            config.subagent_heartbeat_timeout_secs_for_provider(active_provider)
         ),
         _ => unreachable!("canonical subagent key"),
     };
@@ -760,7 +822,7 @@ fn set_subagents_config_value(
     };
 
     if key == "max_concurrent" {
-        app.max_subagents = config.max_subagents();
+        app.max_subagents = config.max_subagents_for_provider(app.api_provider);
     }
     let display_value = subagents_config_display_value(&config, key);
     let note = note.map(|note| format!("; {note}")).unwrap_or_default();
@@ -822,20 +884,17 @@ fn subagents_config_display_value(config: &Config, key: &str) -> String {
 }
 
 fn subagents_runtime_action(app: &App, config: &Config) -> AppAction {
-    let max_subagents = app.max_subagents.clamp(1, MAX_SUBAGENTS);
-    let launch_concurrency = config
-        .subagents
-        .as_ref()
-        .and_then(|cfg| cfg.launch_concurrency.or(cfg.interactive_max_launch_legacy))
-        .unwrap_or(max_subagents)
-        .clamp(1, max_subagents);
+    let provider = app.api_provider;
+    let max_subagents = config
+        .max_subagents_for_provider(provider)
+        .clamp(1, MAX_SUBAGENTS);
     AppAction::UpdateSubagentRuntimeConfig {
-        enabled: config.subagents_enabled(),
+        enabled: config.subagents_enabled_for_provider(provider),
         max_subagents,
-        launch_concurrency,
-        max_spawn_depth: config.subagent_max_spawn_depth(),
-        api_timeout_secs: config.subagent_api_timeout_secs(),
-        heartbeat_timeout_secs: config.subagent_heartbeat_timeout_secs(),
+        launch_concurrency: config.launch_concurrency_for_provider(provider),
+        max_spawn_depth: config.subagent_max_spawn_depth_for_provider(provider),
+        api_timeout_secs: config.subagent_api_timeout_secs_for_provider(provider),
+        heartbeat_timeout_secs: config.subagent_heartbeat_timeout_secs_for_provider(provider),
     }
 }
 
@@ -1712,6 +1771,53 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_config_command_restores_pinned_sidebar_by_default() {
+        let mut app = create_test_app();
+        app.sidebar_focus = SidebarFocus::Hidden;
+        app.last_sidebar_host_width = Some(120);
+
+        let result = sidebar(&mut app, Some("on"));
+
+        assert!(!result.is_error);
+        assert_eq!(app.sidebar_focus, SidebarFocus::Pinned);
+        assert_eq!(result.message.as_deref(), Some("Sidebar is visible"));
+    }
+
+    #[test]
+    fn sidebar_config_command_reports_width_suppression() {
+        let mut app = create_test_app();
+        app.sidebar_focus = SidebarFocus::Hidden;
+        app.last_sidebar_host_width = Some(80);
+
+        let result = sidebar(&mut app, Some("on"));
+
+        assert!(!result.is_error);
+        assert_eq!(app.sidebar_focus, SidebarFocus::Pinned);
+        assert_eq!(
+            result.message.as_deref(),
+            Some(
+                "Sidebar is on, but hidden because the terminal is too narrow (80 cols; needs at least 100)"
+            )
+        );
+    }
+
+    #[test]
+    fn sidebar_config_command_reports_auto_idle_collapse() {
+        let mut app = create_test_app();
+        app.sidebar_focus = SidebarFocus::Hidden;
+        app.last_sidebar_host_width = Some(120);
+
+        let result = sidebar(&mut app, Some("auto"));
+
+        assert!(!result.is_error);
+        assert_eq!(app.sidebar_focus, SidebarFocus::Auto);
+        assert_eq!(
+            result.message.as_deref(),
+            Some("Sidebar auto mode is on, but currently collapsed while idle")
+        );
+    }
+
+    #[test]
     fn test_mode_yolo_sets_all_flags() {
         let mut app = create_test_app();
         // Switch to Agent first to guarantee a clean starting state regardless of
@@ -2108,16 +2214,17 @@ mod tests {
         let result = config_command(&mut app, Some("subagents max_depth 99 --save"));
         let msg = result.message.unwrap();
         let saved = fs::read_to_string(&config_path).unwrap();
+        let ceiling = codewhale_config::MAX_SPAWN_DEPTH_CEILING;
 
         assert!(!result.is_error);
-        assert!(msg.contains("subagents.max_depth = 3"));
-        assert!(msg.contains("clamped from 99 to 3"));
-        assert!(saved.contains("max_depth = 3"));
+        assert!(msg.contains(&format!("subagents.max_depth = {ceiling}")));
+        assert!(msg.contains(&format!("clamped from 99 to {ceiling}")));
+        assert!(saved.contains(&format!("max_depth = {ceiling}")));
         match result.action {
             Some(AppAction::UpdateSubagentRuntimeConfig {
                 max_spawn_depth, ..
             }) => {
-                assert_eq!(max_spawn_depth, codewhale_config::MAX_SPAWN_DEPTH_CEILING);
+                assert_eq!(max_spawn_depth, ceiling);
             }
             other => panic!("expected subagent runtime update, got {other:?}"),
         }
@@ -2152,10 +2259,22 @@ heartbeat_timeout_secs = 1
 
         assert!(!result.is_error);
         assert!(msg.contains("Sub-agents: disabled (subagents.max_depth=0)"));
-        assert!(msg.contains("subagents.max_concurrent = 2 (resolved 2)"));
-        assert!(msg.contains("subagents.launch_concurrency = 5 (resolved 2)"));
-        assert!(msg.contains("subagents.api_timeout_secs = 0 (resolved 120)"));
-        assert!(msg.contains("subagents.heartbeat_timeout_secs = 1 (resolved 150)"));
+        assert!(msg.contains("Active provider: deepseek"));
+        assert!(
+            msg.contains("subagents.max_concurrent = 2 (resolved global 2; active provider 2)")
+        );
+        assert!(
+            msg.contains("subagents.launch_concurrency = 5 (resolved global 2; active provider 2)")
+        );
+        assert!(
+            msg.contains(
+                "subagents.api_timeout_secs = 0 (resolved global 120; active provider 120)"
+            )
+        );
+        assert!(msg.contains(
+            "subagents.heartbeat_timeout_secs = 1 (resolved global 150; active provider 150)"
+        ));
+        assert!(msg.contains("subagents.providers.deepseek = inherits global"));
     }
 
     #[test]

@@ -107,7 +107,7 @@ delegation levels. Sub-agents and fleet workers share **one** axis, sourced from
 
 - `DEFAULT_SPAWN_DEPTH = 3` — the default budget for both standalone sub-agents
   and fleet workers (so they cannot drift into "two moving targets");
-- `MAX_SPAWN_DEPTH_CEILING = 3` — the hard cap that every configured value
+- `MAX_SPAWN_DEPTH_CEILING = 8` — the opt-in cap that every configured value
   (fleet `max_spawn_depth`, `agent`'s `max_depth`) clamps to.
 
 The root worker always runs even at budget 0; the budget gates *child*
