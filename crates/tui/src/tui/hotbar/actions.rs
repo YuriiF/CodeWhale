@@ -4,10 +4,13 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 
 use crate::commands::{self, CommandInfo, CommandResult};
+use crate::localization::Locale;
 use crate::tui::app::{App, AppAction, AppMode, SidebarFocus};
 use crate::tui::command_palette::{
     CommandPaletteView, build_entries as build_command_palette_entries,
 };
+
+pub const HOTBAR_COMPACT_LABEL_MAX_WIDTH: usize = 7;
 
 /// Result of firing a hotbar action.
 #[allow(dead_code)]
@@ -19,11 +22,140 @@ pub enum HotbarDispatch {
     AppAction(AppAction),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[allow(dead_code)]
+pub enum HotbarActionCategory {
+    App,
+    Slash,
+    Mcp,
+    Skill,
+    Plugin,
+}
+
+impl HotbarActionCategory {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::Slash => "slash",
+            Self::Mcp => "mcp",
+            Self::Skill => "skill",
+            Self::Plugin => "plugin",
+        }
+    }
+
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "app" => Some(Self::App),
+            "slash" => Some(Self::Slash),
+            "mcp" => Some(Self::Mcp),
+            "skill" => Some(Self::Skill),
+            "plugin" => Some(Self::Plugin),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotbarArgsBehavior {
+    None,
+    Optional,
+    Required,
+}
+
+impl HotbarArgsBehavior {
+    #[must_use]
+    fn for_command(info: &CommandInfo) -> Self {
+        if info.requires_required_argument() {
+            Self::Required
+        } else if info.requires_argument() {
+            Self::Optional
+        } else {
+            Self::None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum HotbarSafetyClass {
+    LocalUi,
+    LocalState,
+    ExternalInput,
+    ExistingCommand,
+    RequiresApproval,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotbarRecommendation {
+    Default,
+    Eligible,
+    Advanced,
+}
+
+impl HotbarRecommendation {
+    #[must_use]
+    #[allow(dead_code)]
+    pub const fn is_recommendable(self) -> bool {
+        matches!(self, Self::Default | Self::Eligible)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotbarActionMetadata {
+    pub id: String,
+    pub source_id: String,
+    pub display_name: String,
+    pub compact_label: String,
+    pub description: String,
+    pub category: HotbarActionCategory,
+    pub args: HotbarArgsBehavior,
+    pub safety: HotbarSafetyClass,
+    pub recommendation: HotbarRecommendation,
+}
+
+impl HotbarActionMetadata {
+    #[must_use]
+    pub fn validation_errors(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.id.trim().is_empty() {
+            errors.push("id must not be empty".to_string());
+        }
+        if self.source_id.trim().is_empty() {
+            errors.push(format!("{} source_id must not be empty", self.id));
+        }
+        if self.display_name.trim().is_empty() {
+            errors.push(format!("{} display_name must not be empty", self.id));
+        }
+        if self.compact_label.trim().is_empty() {
+            errors.push(format!("{} compact_label must not be empty", self.id));
+        }
+        if unicode_width::UnicodeWidthStr::width(self.compact_label.as_str())
+            > HOTBAR_COMPACT_LABEL_MAX_WIDTH
+        {
+            errors.push(format!(
+                "{} compact_label {:?} exceeds {} display cells",
+                self.id, self.compact_label, HOTBAR_COMPACT_LABEL_MAX_WIDTH
+            ));
+        }
+        if self.description.trim().is_empty() {
+            errors.push(format!("{} description must not be empty", self.id));
+        }
+        errors
+    }
+}
+
 /// Uniform interface for actions that can be bound to a hotbar slot.
 #[allow(dead_code)]
 pub trait HotbarAction: Send + Sync {
     /// Stable action id used in config and dispatch.
     fn id(&self) -> &str;
+
+    /// Complete metadata used by renderers, setup wizard recommendations, and
+    /// future source adapters.
+    fn metadata(&self, locale: Locale) -> HotbarActionMetadata;
 
     /// Compact cell label. Built-ins keep this at seven characters or less.
     fn short_label(&self) -> &str;
@@ -33,6 +165,12 @@ pub trait HotbarAction: Send + Sync {
 
     /// Whether the action is currently active in the supplied app state.
     fn is_active(&self, app: &App) -> bool;
+
+    /// Dynamic unavailable reason. `None` means the action is dispatchable
+    /// through its normal safety path.
+    fn disabled_reason(&self, _app: &App) -> Option<String> {
+        None
+    }
 
     /// Fire the action.
     fn dispatch(&self, app: &mut App) -> Result<HotbarDispatch>;
@@ -58,59 +196,83 @@ impl HotbarActionRegistry {
     }
 
     pub fn register(&mut self, action: impl HotbarAction + 'static) {
-        self.actions
-            .insert(action.id().to_string(), Arc::new(action));
+        let id = action.id().to_string();
+        assert!(!id.trim().is_empty(), "hotbar action id must not be empty");
+        assert!(
+            self.actions.insert(id.clone(), Arc::new(action)).is_none(),
+            "duplicate hotbar action id {id}"
+        );
     }
 
     pub(crate) fn register_builtins(&mut self) {
         self.register(AppHotbarAction::new(
             "voice.toggle",
             "voice",
+            "Voice input",
+            "Toggle voice capture from the terminal microphone.",
             AppHotbarKind::VoiceToggle,
         ));
         self.register(AppHotbarAction::new(
             "session.compact",
             "compact",
+            "Compact session",
+            "Compact the current conversation context.",
             AppHotbarKind::SessionCompact,
         ));
         self.register(AppHotbarAction::new(
             "mode.plan",
             "plan",
+            "Plan mode",
+            "Switch the conversation into Plan mode.",
             AppHotbarKind::Mode(AppMode::Plan),
         ));
         self.register(AppHotbarAction::new(
             "mode.agent",
             "agent",
+            "Agent mode",
+            "Switch the conversation into Agent mode.",
             AppHotbarKind::Mode(AppMode::Agent),
         ));
         self.register(AppHotbarAction::new(
             "mode.yolo",
             "yolo",
+            "YOLO mode",
+            "Switch the conversation into YOLO mode.",
             AppHotbarKind::Mode(AppMode::Yolo),
         ));
         self.register(AppHotbarAction::new(
             "reasoning.cycle",
             "reason",
+            "Cycle reasoning",
+            "Cycle the configured reasoning effort for the active provider.",
             AppHotbarKind::ReasoningCycle,
         ));
         self.register(AppHotbarAction::new(
             "sidebar.toggle",
             "side",
+            "Toggle sidebar",
+            "Show or hide the sidebar.",
             AppHotbarKind::SidebarToggle,
         ));
         self.register(AppHotbarAction::new(
             "filetree.toggle",
             "files",
+            "Toggle file tree",
+            "Show or hide the workspace file tree.",
             AppHotbarKind::FileTreeToggle,
         ));
         self.register(AppHotbarAction::new(
             "palette.open",
             "palette",
+            "Command palette",
+            "Open the command palette.",
             AppHotbarKind::PaletteOpen,
         ));
         self.register(AppHotbarAction::new(
             "trust.toggle",
             "trust",
+            "Toggle trust",
+            "Enable or disable workspace trust mode.",
             AppHotbarKind::TrustToggle,
         ));
     }
@@ -143,6 +305,46 @@ impl HotbarActionRegistry {
     pub fn iter(&self) -> impl Iterator<Item = &dyn HotbarAction> {
         self.actions.values().map(Arc::as_ref)
     }
+
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn metadata(&self, locale: Locale) -> Vec<HotbarActionMetadata> {
+        self.iter().map(|action| action.metadata(locale)).collect()
+    }
+
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn metadata_validation_errors(&self, locale: Locale) -> Vec<String> {
+        let mut errors = Vec::new();
+        for action in self.iter() {
+            let metadata = action.metadata(locale);
+            if metadata.id != action.id() {
+                errors.push(format!(
+                    "{} metadata id {:?} does not match action id",
+                    action.id(),
+                    metadata.id
+                ));
+            }
+            if metadata.compact_label != action.short_label() {
+                errors.push(format!(
+                    "{} metadata compact_label {:?} does not match short_label {:?}",
+                    action.id(),
+                    metadata.compact_label,
+                    action.short_label()
+                ));
+            }
+            if metadata.category.as_str() != action.category() {
+                errors.push(format!(
+                    "{} metadata category {:?} does not match category {:?}",
+                    action.id(),
+                    metadata.category.as_str(),
+                    action.category()
+                ));
+            }
+            errors.extend(metadata.validation_errors());
+        }
+        errors
+    }
 }
 
 fn dispatch_command_result(app: &mut App, result: CommandResult) -> HotbarDispatch {
@@ -168,15 +370,47 @@ enum AppHotbarKind {
 struct AppHotbarAction {
     id: &'static str,
     short_label: &'static str,
+    display_name: &'static str,
+    description: &'static str,
     kind: AppHotbarKind,
 }
 
 impl AppHotbarAction {
-    const fn new(id: &'static str, short_label: &'static str, kind: AppHotbarKind) -> Self {
+    const fn new(
+        id: &'static str,
+        short_label: &'static str,
+        display_name: &'static str,
+        description: &'static str,
+        kind: AppHotbarKind,
+    ) -> Self {
         Self {
             id,
             short_label,
+            display_name,
+            description,
             kind,
+        }
+    }
+
+    fn safety(&self) -> HotbarSafetyClass {
+        match self.kind {
+            AppHotbarKind::VoiceToggle => HotbarSafetyClass::ExternalInput,
+            AppHotbarKind::TrustToggle => HotbarSafetyClass::LocalState,
+            AppHotbarKind::SessionCompact | AppHotbarKind::ReasoningCycle => {
+                HotbarSafetyClass::LocalState
+            }
+            AppHotbarKind::Mode(_)
+            | AppHotbarKind::SidebarToggle
+            | AppHotbarKind::FileTreeToggle
+            | AppHotbarKind::PaletteOpen => HotbarSafetyClass::LocalUi,
+        }
+    }
+
+    fn recommendation(&self) -> HotbarRecommendation {
+        if codewhale_config::DEFAULT_HOTBAR_ACTIONS.contains(&self.id) {
+            HotbarRecommendation::Default
+        } else {
+            HotbarRecommendation::Eligible
         }
     }
 }
@@ -184,6 +418,20 @@ impl AppHotbarAction {
 impl HotbarAction for AppHotbarAction {
     fn id(&self) -> &str {
         self.id
+    }
+
+    fn metadata(&self, _locale: Locale) -> HotbarActionMetadata {
+        HotbarActionMetadata {
+            id: self.id.to_string(),
+            source_id: "builtin".to_string(),
+            display_name: self.display_name.to_string(),
+            compact_label: self.short_label.to_string(),
+            description: self.description.to_string(),
+            category: HotbarActionCategory::App,
+            args: HotbarArgsBehavior::None,
+            safety: self.safety(),
+            recommendation: self.recommendation(),
+        }
     }
 
     fn short_label(&self) -> &str {
@@ -206,6 +454,15 @@ impl HotbarAction for AppHotbarAction {
             AppHotbarKind::FileTreeToggle => app.file_tree.is_some(),
             AppHotbarKind::PaletteOpen => false,
             AppHotbarKind::TrustToggle => app.trust_mode,
+        }
+    }
+
+    fn disabled_reason(&self, app: &App) -> Option<String> {
+        match self.kind {
+            AppHotbarKind::ReasoningCycle if app.auto_model => {
+                Some("Reasoning effort is controlled by auto model routing.".to_string())
+            }
+            _ => None,
         }
     }
 
@@ -329,6 +586,27 @@ impl HotbarAction for SlashHotbarAction {
         &self.id
     }
 
+    fn metadata(&self, locale: Locale) -> HotbarActionMetadata {
+        let recommendation = match self.info.discovery() {
+            crate::commands::traits::CommandDiscovery::Primary => HotbarRecommendation::Eligible,
+            crate::commands::traits::CommandDiscovery::Advanced
+            | crate::commands::traits::CommandDiscovery::Compatibility => {
+                HotbarRecommendation::Advanced
+            }
+        };
+        HotbarActionMetadata {
+            id: self.id.clone(),
+            source_id: format!("command:{}", self.info.name),
+            display_name: format!("/{}", self.info.name),
+            compact_label: self.short_label.clone(),
+            description: self.info.description_for(locale).to_string(),
+            category: HotbarActionCategory::Slash,
+            args: HotbarArgsBehavior::for_command(self.info),
+            safety: HotbarSafetyClass::ExistingCommand,
+            recommendation,
+        }
+    }
+
     fn short_label(&self) -> &str {
         &self.short_label
     }
@@ -355,6 +633,7 @@ impl HotbarAction for SlashHotbarAction {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     use crate::config::{ApiProvider, Config};
@@ -390,6 +669,170 @@ mod tests {
         app
     }
 
+    struct TestHotbarAction {
+        id: &'static str,
+    }
+
+    impl HotbarAction for TestHotbarAction {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn metadata(&self, _locale: Locale) -> HotbarActionMetadata {
+            HotbarActionMetadata {
+                id: self.id.to_string(),
+                source_id: "test".to_string(),
+                display_name: "Test action".to_string(),
+                compact_label: "test".to_string(),
+                description: "Test action descriptor".to_string(),
+                category: HotbarActionCategory::App,
+                args: HotbarArgsBehavior::None,
+                safety: HotbarSafetyClass::LocalUi,
+                recommendation: HotbarRecommendation::Eligible,
+            }
+        }
+
+        fn short_label(&self) -> &str {
+            "test"
+        }
+
+        fn category(&self) -> &str {
+            "app"
+        }
+
+        fn is_active(&self, _app: &App) -> bool {
+            false
+        }
+
+        fn dispatch(&self, _app: &mut App) -> Result<HotbarDispatch> {
+            Ok(HotbarDispatch::Handled)
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate hotbar action id duplicate.action")]
+    fn registry_rejects_duplicate_action_ids() {
+        let mut registry = HotbarActionRegistry::new();
+        registry.register(TestHotbarAction {
+            id: "duplicate.action",
+        });
+        registry.register(TestHotbarAction {
+            id: "duplicate.action",
+        });
+    }
+
+    #[test]
+    fn registry_metadata_contract_covers_registered_actions() {
+        let registry = HotbarActionRegistry::with_builtins();
+        let errors = registry.metadata_validation_errors(Locale::En);
+        assert!(errors.is_empty(), "metadata validation failed: {errors:?}");
+
+        let metadata = registry.metadata(Locale::En);
+        assert_eq!(metadata.len(), registry.len());
+
+        let ids = metadata
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>();
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort_unstable();
+        assert_eq!(
+            ids, sorted_ids,
+            "registry metadata should have stable id order"
+        );
+        assert_eq!(
+            ids.iter().copied().collect::<BTreeSet<_>>().len(),
+            ids.len(),
+            "metadata ids must be unique"
+        );
+
+        for entry in metadata {
+            assert_eq!(
+                HotbarActionCategory::parse(entry.category.as_str()),
+                Some(entry.category)
+            );
+            let entry_errors = entry.validation_errors();
+            assert!(
+                entry_errors.is_empty(),
+                "metadata entry failed validation: {entry_errors:?}"
+            );
+            assert!(
+                unicode_width::UnicodeWidthStr::width(entry.compact_label.as_str())
+                    <= HOTBAR_COMPACT_LABEL_MAX_WIDTH,
+                "compact label should be validated: {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_hotbar_actions_have_registered_default_metadata() {
+        let registry = HotbarActionRegistry::with_builtins();
+
+        for id in codewhale_config::DEFAULT_HOTBAR_ACTIONS {
+            let action = registry
+                .get(id)
+                .unwrap_or_else(|| panic!("missing default hotbar action {id}"));
+            let metadata = action.metadata(Locale::En);
+            assert_eq!(metadata.category, HotbarActionCategory::App);
+            assert_eq!(metadata.args, HotbarArgsBehavior::None);
+            assert_eq!(metadata.recommendation, HotbarRecommendation::Default);
+            assert!(
+                metadata.recommendation.is_recommendable(),
+                "default action must be recommendable: {metadata:?}"
+            );
+            assert!(!metadata.display_name.trim().is_empty());
+            assert!(!metadata.description.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn slash_action_metadata_describes_args_and_recommendations() {
+        let registry = HotbarActionRegistry::with_builtins();
+
+        let compact = registry
+            .get("slash.compact")
+            .expect("compact slash action")
+            .metadata(Locale::En);
+        assert_eq!(compact.category, HotbarActionCategory::Slash);
+        assert_eq!(compact.source_id, "command:compact");
+        assert_eq!(compact.display_name, "/compact");
+        assert_eq!(compact.args, HotbarArgsBehavior::None);
+        assert_eq!(compact.safety, HotbarSafetyClass::ExistingCommand);
+        assert_eq!(compact.recommendation, HotbarRecommendation::Eligible);
+
+        let mode = registry
+            .get("slash.mode")
+            .expect("mode slash action")
+            .metadata(Locale::En);
+        assert_eq!(mode.args, HotbarArgsBehavior::Optional);
+
+        let rename = registry
+            .get("slash.rename")
+            .expect("rename slash action")
+            .metadata(Locale::En);
+        assert_eq!(rename.args, HotbarArgsBehavior::Required);
+        assert_eq!(rename.recommendation, HotbarRecommendation::Advanced);
+    }
+
+    #[test]
+    fn app_action_metadata_exposes_dynamic_disabled_reason() {
+        let registry = HotbarActionRegistry::with_builtins();
+        let reasoning = registry.get("reasoning.cycle").expect("reasoning action");
+        let mut app = test_app();
+
+        let metadata = reasoning.metadata(Locale::En);
+        assert_eq!(metadata.category, HotbarActionCategory::App);
+        assert_eq!(metadata.safety, HotbarSafetyClass::LocalState);
+        assert_eq!(metadata.recommendation, HotbarRecommendation::Eligible);
+        assert!(reasoning.disabled_reason(&app).is_none());
+
+        app.auto_model = true;
+        assert_eq!(
+            reasoning.disabled_reason(&app).as_deref(),
+            Some("Reasoning effort is controlled by auto model routing.")
+        );
+    }
+
     #[test]
     fn builtins_register_expected_actions() {
         let mut registry = HotbarActionRegistry::new();
@@ -415,7 +858,8 @@ mod tests {
         for action in registry.iter() {
             assert_eq!(action.category(), "app");
             assert!(
-                action.short_label().chars().count() <= 7,
+                unicode_width::UnicodeWidthStr::width(action.short_label())
+                    <= HOTBAR_COMPACT_LABEL_MAX_WIDTH,
                 "{} has an overlong short label",
                 action.id()
             );
@@ -446,7 +890,8 @@ mod tests {
             assert_eq!(action.category(), "slash");
             assert!(!action.is_active(&test_app()));
             assert!(
-                action.short_label().chars().count() <= 7,
+                unicode_width::UnicodeWidthStr::width(action.short_label())
+                    <= HOTBAR_COMPACT_LABEL_MAX_WIDTH,
                 "{action_id} has an overlong short label"
             );
         }
