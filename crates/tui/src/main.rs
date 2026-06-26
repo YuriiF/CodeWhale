@@ -6426,6 +6426,7 @@ struct ExecStreamMeta {
     input_tokens: u32,
     output_tokens: u32,
     input_analysis: ExecStreamInputAnalysis,
+    visible_final_answer_chars: usize,
     session_id: String,
     resume_command: String,
     workspace: String,
@@ -7142,6 +7143,7 @@ async fn run_exec_agent(
                                 &latest_messages,
                                 latest_system_prompt.as_ref(),
                             ),
+                            visible_final_answer_chars: summary.output.chars().count(),
                             resume_command: saved_session_id
                                 .as_deref()
                                 .map(exec_stream_resume_hint)
@@ -7993,6 +7995,7 @@ mod terminal_mode_tests {
                 input_tokens: 123,
                 output_tokens: 45,
                 input_analysis: ExecStreamInputAnalysis::default(),
+                visible_final_answer_chars: 17,
                 session_id: exec_stream_session_ref(raw_session_id),
                 resume_command: exec_stream_resume_hint(raw_session_id),
                 workspace: "/tmp/work".to_string(),
@@ -8019,6 +8022,7 @@ mod terminal_mode_tests {
         );
         assert_eq!(parsed["meta"]["workspace"], "/tmp/work");
         assert_eq!(parsed["meta"]["message_count"], 4);
+        assert_eq!(parsed["meta"]["visible_final_answer_chars"], 17);
 
         let capture = ExecStreamEvent::SessionCapture {
             content: exec_stream_session_ref(raw_session_id),
