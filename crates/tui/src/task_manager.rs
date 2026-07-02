@@ -1935,7 +1935,7 @@ mod tests {
             })?,
         )?;
 
-        let (tasks, queue, recovered) = load_state(&tasks_dir, &queue_path)?;
+        let (tasks, queue, _recovered) = load_state(&tasks_dir, &queue_path)?;
         let recovered = tasks.get(&task_id).expect("task loaded");
 
         assert!(queue.is_empty(), "stale running task must not be requeued");
