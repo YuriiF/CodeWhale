@@ -61,6 +61,9 @@ use crate::utils::spawn_supervised;
 use crate::worker_profile::{ModelRoute, WorkerRuntimeProfile};
 use crate::working_set::WorkingSet;
 
+#[cfg(test)]
+use super::authority::agent_approval_mode_for_turn;
+use super::authority::{TurnAuthority, effective_input_policy, shell_policy_for_mode};
 use super::events::{Event, TurnOutcomeStatus};
 use super::ops::{
     Op, ProviderRuntimeStatus, SessionSnapshot, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
@@ -1054,7 +1057,14 @@ impl Engine {
             .unwrap_or_default()
             .to_string();
 
-        self.apply_runtime_mode_policy(mode, allow_shell, trust_mode, auto_approve, approval_mode);
+        let authority = TurnAuthority::from_effective_fields(
+            mode,
+            allow_shell,
+            trust_mode,
+            auto_approve,
+            approval_mode,
+        );
+        self.apply_runtime_mode_policy(&authority);
 
         let _ = self
             .tx_event
@@ -1304,21 +1314,14 @@ impl Engine {
         }
     }
 
-    fn apply_runtime_mode_policy(
-        &mut self,
-        mode: AppMode,
-        allow_shell: bool,
-        trust_mode: bool,
-        auto_approve: bool,
-        approval_mode: crate::tui::approval::ApprovalMode,
-    ) {
-        self.current_mode = mode;
-        self.session.allow_shell = allow_shell;
-        self.config.allow_shell = allow_shell;
-        self.session.trust_mode = trust_mode;
-        self.config.trust_mode = trust_mode;
-        self.session.auto_approve = auto_approve;
-        self.session.approval_mode = agent_approval_mode_for_turn(auto_approve, approval_mode);
+    fn apply_runtime_mode_policy(&mut self, authority: &TurnAuthority) {
+        self.current_mode = authority.mode;
+        self.session.allow_shell = authority.allow_shell;
+        self.config.allow_shell = authority.allow_shell;
+        self.session.trust_mode = authority.trust_mode;
+        self.config.trust_mode = authority.trust_mode;
+        self.session.auto_approve = authority.auto_approve;
+        self.session.approval_mode = authority.approval_mode_for_session();
     }
 
     /// Run the engine event loop
@@ -1585,13 +1588,14 @@ impl Engine {
                         auto_approve,
                         approval_mode,
                     } => {
-                        self.apply_runtime_mode_policy(
+                        let authority = TurnAuthority::from_effective_fields(
                             mode,
                             allow_shell,
                             trust_mode,
                             auto_approve,
                             approval_mode,
                         );
+                        self.apply_runtime_mode_policy(&authority);
                         self.emit_session_updated().await;
                         let _ = self
                             .tx_event
@@ -2297,13 +2301,7 @@ impl Engine {
         // Track the complete effective mode policy so mid-turn metadata, `/edit`,
         // idle worker resumptions, and approval gates cannot read a stale policy
         // after the UI changed modes (#3568).
-        self.apply_runtime_mode_policy(
-            input_policy.mode,
-            input_policy.allow_shell,
-            input_policy.trust_mode,
-            input_policy.auto_approve,
-            input_policy.approval_mode,
-        );
+        self.apply_runtime_mode_policy(&input_policy);
 
         // Drain stale steer messages from previous turns.
         while self.rx_steer.try_recv().is_ok() {}
@@ -3082,6 +3080,13 @@ impl Engine {
     }
 
     fn build_tool_context(&self, mode: AppMode, auto_approve: bool) -> ToolContext {
+        let authority = TurnAuthority::from_effective_fields(
+            mode,
+            self.session.allow_shell,
+            self.session.trust_mode,
+            mode == AppMode::Yolo || auto_approve,
+            self.session.approval_mode,
+        );
         // Load the per-workspace trusted-paths list (#29) on every tool-context
         // build. Cheap (a small JSON file) and always reflects the latest
         // `/trust add` / `/trust remove` mutations without an explicit cache
@@ -3098,10 +3103,10 @@ impl Engine {
         }
         let mut ctx = ToolContext::with_auto_approve(
             self.session.workspace.clone(),
-            self.session.trust_mode,
+            authority.trust_mode,
             self.session.notes_path.clone(),
             self.session.mcp_config_path.clone(),
-            mode == AppMode::Yolo || auto_approve,
+            authority.auto_approve,
         )
         .with_state_namespace(self.session.id.clone())
         .with_features(self.config.features.clone())
@@ -3119,7 +3124,7 @@ impl Engine {
             self.session.messages.clone().into(),
         ))
         .with_cancel_token(self.cancel_token.clone())
-        .with_shell_policy(shell_policy_for_mode(mode, self.session.allow_shell))
+        .with_shell_policy(authority.shell_policy())
         .with_trusted_external_paths(trusted_external_paths)
         .with_follow_symlinks(self.config.workspace_follow_symlinks);
 
@@ -3158,7 +3163,7 @@ impl Engine {
         ctx.search_api_key = self.config.search_api_key.clone();
         ctx.search_base_url = self.config.search_base_url.clone();
 
-        let policy = sandbox_policy_for_mode(mode, &self.session.workspace);
+        let policy = authority.sandbox_policy(&self.session.workspace);
         let mut ctx = ctx.with_elevated_sandbox_policy(policy);
         if matches!(mode, AppMode::Plan) {
             ctx = ctx.with_shell_network_denied_hint(
@@ -3531,88 +3536,6 @@ fn goal_objective_for_prompt(
 // byte-stable, and strict chat-template providers never see a system message
 // outside messages[0].
 
-#[derive(Debug, Clone)]
-struct EffectiveInputPolicy {
-    mode: AppMode,
-    allow_shell: bool,
-    trust_mode: bool,
-    auto_approve: bool,
-    approval_mode: crate::tui::approval::ApprovalMode,
-    dynamic_active_tools: Vec<&'static str>,
-    status: Option<String>,
-}
-
-fn effective_input_policy(
-    provenance: UserInputProvenance,
-    requested_mode: AppMode,
-    _content: &str,
-    allow_shell: bool,
-    trust_mode: bool,
-    auto_approve: bool,
-    approval_mode: crate::tui::approval::ApprovalMode,
-) -> EffectiveInputPolicy {
-    let mut mode = requested_mode;
-    let mut trust_mode = trust_mode;
-    let mut auto_approve = auto_approve;
-    let mut approval_mode = approval_mode;
-    let dynamic_active_tools = Vec::new();
-    let mut status = None;
-
-    if !provenance_can_inherit_standing_auto_authority(provenance) {
-        let had_auto_authority = matches!(mode, AppMode::Yolo)
-            || trust_mode
-            || auto_approve
-            || matches!(approval_mode, crate::tui::approval::ApprovalMode::Bypass);
-        if matches!(mode, AppMode::Yolo) {
-            mode = AppMode::Agent;
-        }
-        trust_mode = false;
-        auto_approve = false;
-        if matches!(
-            approval_mode,
-            crate::tui::approval::ApprovalMode::Auto | crate::tui::approval::ApprovalMode::Bypass
-        ) {
-            approval_mode = crate::tui::approval::ApprovalMode::Suggest;
-        }
-        if had_auto_authority {
-            status = Some(format!(
-                "Input provenance '{}' cannot inherit standing auto-approval authority; continuing with approvals required.",
-                provenance.as_str()
-            ));
-        }
-    }
-
-    EffectiveInputPolicy {
-        mode,
-        allow_shell,
-        trust_mode,
-        auto_approve,
-        approval_mode,
-        dynamic_active_tools,
-        status,
-    }
-}
-
-fn provenance_can_inherit_standing_auto_authority(provenance: UserInputProvenance) -> bool {
-    matches!(
-        provenance,
-        UserInputProvenance::ExternalUser
-            | UserInputProvenance::Runtime
-            | UserInputProvenance::SubAgentHandoff
-    )
-}
-
-fn agent_approval_mode_for_turn(
-    auto_approve: bool,
-    approval_mode: crate::tui::approval::ApprovalMode,
-) -> crate::tui::approval::ApprovalMode {
-    if auto_approve {
-        crate::tui::approval::ApprovalMode::Bypass
-    } else {
-        approval_mode
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ToolAskRuleDecision {
     Prompt(String),
@@ -3974,7 +3897,6 @@ use self::tool_catalog::{
     preflight_requested_deferred_tool, should_default_defer_tool,
 };
 use self::tool_execution::emit_tool_audit;
-use self::tool_setup::{sandbox_policy_for_mode, shell_policy_for_mode};
 use crate::tools::js_execution::execute_js_execution_tool;
 
 #[cfg(test)]

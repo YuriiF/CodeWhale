@@ -20,6 +20,7 @@ use crate::config::{
     save_api_key,
 };
 use crate::config_ui::ConfigUiMode;
+use crate::core::authority::{ModeSessionPrefs, base_policy_for_mode};
 use crate::hooks::{HookContext, HookEvent, HookExecutor, HookResult};
 use crate::localization::{Locale, MessageId, resolve_locale, tr};
 use crate::models::{Message, SystemPrompt, Tool};
@@ -1085,75 +1086,6 @@ pub enum InitialInput {
     /// Pre-populate the composer, submit it once startup is ready, then keep
     /// the interactive session open for follow-up messages (#2370).
     Submit(String),
-}
-
-/// Durable Agent-era permission baseline that Plan/YOLO restore to (#3386).
-///
-/// Mode cycling used to be tangled with permission policy: each mode mutated
-/// `allow_shell`/`trust_mode`/`approval_mode` directly and ad-hoc
-/// `YoloRestoreState`/`PlanRestoreState` snapshots tried to put things back on
-/// exit. That made it easy to leak YOLO's elevated authority into Agent.
-///
-/// Instead we keep one canonical baseline here — the permission surface the
-/// user has chosen for Agent mode — and derive every mode's effective policy
-/// from it via [`base_policy_for_mode`]. `set_mode` refreshes this from the
-/// live fields whenever the user leaves Agent, so toggling shell/trust/approval
-/// in Agent (wherever that happens in the UI) is captured before any transient
-/// Plan/YOLO policy overwrites the live mirrors.
-#[derive(Debug, Clone, Copy)]
-struct ModeSessionPrefs {
-    agent_allow_shell: bool,
-    agent_trust_mode: bool,
-    agent_approval_mode: ApprovalMode,
-}
-
-/// The permission policy a given [`AppMode`] resolves to (#3386).
-///
-/// This is a pure projection of `(mode, prefs)` — see [`base_policy_for_mode`].
-/// The App keeps `allow_shell`/`trust_mode`/`approval_mode`/`yolo` as derived
-/// mirrors of these values so the rest of the crate can keep reading the
-/// existing fields without a type migration. YOLO authority is derived from
-/// `ApprovalMode::Bypass`, not carried as a separate mode-table knob (#3736).
-#[derive(Debug, Clone, Copy)]
-struct EffectiveModePolicy {
-    #[allow(dead_code)]
-    mode: AppMode,
-    allow_shell: bool,
-    trust_mode: bool,
-    approval_mode: ApprovalMode,
-}
-
-/// Resolve a mode's effective permission policy from the durable Agent baseline.
-///
-/// This is the single source of truth for the mode/permission table (#3386):
-/// - `Plan`   → read-only: no shell, no trust, `Suggest` approvals.
-/// - `Agent`  → the user's durable baseline (`prefs`).
-/// - `Auto`   → compatibility alias for Agent; not a separate behavior.
-/// - `Yolo`   → full authority: shell + trust + `Bypass` approvals.
-///
-/// Pure and side-effect free so it can be unit-tested directly and reused by
-/// any policy consumer.
-fn base_policy_for_mode(mode: AppMode, prefs: &ModeSessionPrefs) -> EffectiveModePolicy {
-    match mode {
-        AppMode::Plan => EffectiveModePolicy {
-            mode,
-            allow_shell: false,
-            trust_mode: false,
-            approval_mode: ApprovalMode::Suggest,
-        },
-        AppMode::Agent | AppMode::Auto => EffectiveModePolicy {
-            mode,
-            allow_shell: prefs.agent_allow_shell,
-            trust_mode: prefs.agent_trust_mode,
-            approval_mode: prefs.agent_approval_mode,
-        },
-        AppMode::Yolo => EffectiveModePolicy {
-            mode,
-            allow_shell: true,
-            trust_mode: true,
-            approval_mode: ApprovalMode::Bypass,
-        },
-    }
 }
 
 // === Sub-state structs for App field organization (#377) ===

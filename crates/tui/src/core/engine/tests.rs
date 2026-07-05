@@ -3931,7 +3931,7 @@ fn agent_and_yolo_modes_elevate_shell_sandbox_to_allow_network() {
 
 #[test]
 fn sandbox_policy_for_mode_returns_correct_policy_per_mode() {
-    use super::tool_setup::sandbox_policy_for_mode;
+    use crate::core::authority::sandbox_policy_for_mode;
     use crate::sandbox::SandboxPolicy;
 
     let workspace = PathBuf::from("/tmp/example-workspace");
@@ -4219,13 +4219,14 @@ fn runtime_mode_policy_updates_engine_session_mirrors() {
     engine.session.auto_approve = false;
     engine.session.approval_mode = crate::tui::approval::ApprovalMode::Suggest;
 
-    engine.apply_runtime_mode_policy(
+    let agent_authority = crate::core::authority::TurnAuthority::from_effective_fields(
         AppMode::Agent,
         true,
         false,
         false,
         crate::tui::approval::ApprovalMode::Never,
     );
+    engine.apply_runtime_mode_policy(&agent_authority);
 
     assert_eq!(engine.current_mode, AppMode::Agent);
     assert!(engine.session.allow_shell);
@@ -4238,13 +4239,14 @@ fn runtime_mode_policy_updates_engine_session_mirrors() {
         crate::tui::approval::ApprovalMode::Never
     );
 
-    engine.apply_runtime_mode_policy(
+    let yolo_authority = crate::core::authority::TurnAuthority::from_effective_fields(
         AppMode::Yolo,
         true,
         true,
         true,
         crate::tui::approval::ApprovalMode::Bypass,
     );
+    engine.apply_runtime_mode_policy(&yolo_authority);
 
     assert_eq!(engine.current_mode, AppMode::Yolo);
     assert!(engine.session.allow_shell);
