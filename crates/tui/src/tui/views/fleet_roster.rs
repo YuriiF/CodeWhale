@@ -82,7 +82,17 @@ impl FleetRosterView {
     fn from_parts(operator: OperatorInfo, roster: FleetRoster) -> Self {
         Self {
             operator,
-            members: roster.members().to_vec(),
+            // The operator is pinned as its own row 0 (the live session route),
+            // so exclude the built-in "operator" profile from the dispatchable
+            // member list to avoid rendering it twice (#dogfood 0.8.67). The
+            // engine's FleetRoster is untouched, so role/dispatch semantics are
+            // unchanged; only this view drops the duplicate.
+            members: roster
+                .members()
+                .iter()
+                .filter(|m| !m.id.trim().eq_ignore_ascii_case("operator"))
+                .cloned()
+                .collect(),
             selected: 0,
             detail_scroll: 0,
         }
@@ -482,7 +492,12 @@ mod tests {
     }
 
     fn view_with_overrides() -> FleetRosterView {
-        let mut members = FleetRoster::built_ins_only().members().to_vec();
+        let mut members = FleetRoster::built_ins_only()
+            .members()
+            .iter()
+            .filter(|m| !m.id.trim().eq_ignore_ascii_case("operator"))
+            .cloned()
+            .collect::<Vec<_>>();
         // A project override of the built-in reviewer with a pinned model and
         // an instruction overlay.
         if let Some(reviewer) = members.iter_mut().find(|m| m.id == "reviewer") {
@@ -608,11 +623,12 @@ mod tests {
     fn built_in_party_lists_all_members_in_canonical_order() {
         let view = built_in_view();
         let ids: Vec<&str> = view.members.iter().map(|m| m.id.as_str()).collect();
+        // The operator is rendered as the pinned session row, not a member
+        // (#dogfood 0.8.67), so it is intentionally absent from this list.
         assert_eq!(
             ids,
             [
                 "manager",
-                "operator",
                 "scout",
                 "builder",
                 "reviewer",
