@@ -6,7 +6,7 @@
 
 use ratatui::style::Color;
 
-#[path = "../src/palette.rs"]
+#[path = "../src/palette/mod.rs"]
 #[allow(dead_code)]
 mod palette;
 
