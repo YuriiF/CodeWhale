@@ -36,6 +36,7 @@ use crate::config::{
 use crate::core::ops::ProviderRuntimeStatus;
 use crate::model_profile::{SupportState, resolved_capability_profile};
 use crate::palette;
+use crate::provider_lake::catalog_model_count_for_provider;
 use crate::tui::app::ReasoningEffort;
 use crate::tui::views::{
     ActionHint, EmptyState, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent,
@@ -44,7 +45,7 @@ use crate::tui::views::{
 use codewhale_config::catalog::{CatalogOffering, CatalogSnapshot};
 use codewhale_config::provider::WireFormat;
 use codewhale_config::route::{
-    LogicalModelRef, PricingSku, RequestProtocol, RouteRequest, RouteResolver, bundled_offerings,
+    LogicalModelRef, PricingSku, RequestProtocol, RouteRequest, RouteResolver,
 };
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -433,10 +434,7 @@ impl ProviderDashboardRow {
             };
         };
 
-        let available_model_count = bundled_offerings()
-            .iter()
-            .filter(|offering| offering.provider.as_str() == kind.as_str())
-            .count();
+        let available_model_count = catalog_model_count_for_provider(provider);
         let catalog_status = if available_model_count == 0 {
             ProviderCatalogStatus::DefaultOnly
         } else {
@@ -536,6 +534,15 @@ impl ProviderDashboardRow {
                 configured,
                 provider == ApiProvider::Custom && provider_id_override.is_some(),
             ),
+        }
+    }
+
+    fn list_row_hint(&self, view: ProviderListView) -> String {
+        match view {
+            ProviderListView::Configured => {
+                format!("{} | {}", self.readiness.label(), self.auth_status.label())
+            }
+            ProviderListView::Catalog => self.compact_hint(),
         }
     }
 
@@ -1507,7 +1514,7 @@ impl ProviderPickerView {
             } else {
                 Style::default().fg(palette::STATUS_WARNING)
             };
-            let hint = row.compact_hint();
+            let hint = row.list_row_hint(self.view);
             let mut line = Line::from(vec![
                 Span::styled(" ", spacer_style),
                 Span::styled(arrow, label_style),
@@ -3040,12 +3047,8 @@ mod tests {
 
         assert_eq!(row.provider_id, "anthropic");
         assert_eq!(row.supported_protocols, vec!["anthropic".to_string()]);
-        assert_eq!(row.catalog_status, ProviderCatalogStatus::DefaultOnly);
-        assert!(
-            row.messages
-                .iter()
-                .any(|message| message.contains("catalog"))
-        );
+        assert_eq!(row.catalog_status, ProviderCatalogStatus::Bundled);
+        assert!(row.available_model_count >= 3);
     }
 
     #[test]

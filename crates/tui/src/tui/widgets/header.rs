@@ -178,19 +178,19 @@ impl<'a> HeaderWidget<'a> {
 
     fn mode_color(mode: AppMode) -> Color {
         match mode {
-            AppMode::Agent => palette::MODE_AGENT,
-            AppMode::Auto => palette::MODE_AGENT,
-            AppMode::Yolo => palette::MODE_YOLO,
+            AppMode::Agent | AppMode::Auto | AppMode::Multitask => palette::MODE_AGENT,
+            AppMode::Yolo | AppMode::Operate => palette::MODE_YOLO,
             AppMode::Plan => palette::MODE_PLAN,
         }
     }
 
     fn mode_name(mode: AppMode) -> &'static str {
         match mode {
-            AppMode::Agent => "Agent",
-            AppMode::Auto => "Agent",
+            AppMode::Agent | AppMode::Auto => "Act",
             AppMode::Yolo => "Yolo",
             AppMode::Plan => "Plan",
+            AppMode::Multitask => "Multitask",
+            AppMode::Operate => "Operate",
         }
     }
 
@@ -628,7 +628,8 @@ mod tests {
             72,
         );
 
-        assert!(rendered.contains("Agent"));
+        // Wave 7: the Agent mode chip reads "Act".
+        assert!(rendered.contains("Act"));
         assert!(rendered.contains("codewhale-tui"));
         assert!(rendered.contains("deepseek-v4-pro"));
         assert!(!rendered.contains("Plan"));

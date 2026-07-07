@@ -1,6 +1,7 @@
 //! Full-screen live transcript overlay with sticky-bottom auto-scroll (#94).
 //!
-//! Toggled with `Ctrl+T` while the engine is streaming. Behaviour:
+//! Toggled with `Ctrl+Shift+T` while the engine is streaming (`Ctrl+T` now
+//! cycles reasoning effort). Behaviour:
 //!
 //! - At-bottom (`sticky_to_bottom = true`) — every refresh re-pins scroll to
 //!   the new tail, so streaming output appears to flow off the bottom edge.
@@ -40,7 +41,7 @@ use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
 };
 
-/// Render mode for the overlay. `Tail` is the original Ctrl+T sticky-tail
+/// Render mode for the overlay. `Tail` is the original sticky-tail
 /// behaviour (#94). `BacktrackPreview` (#133) highlights the Nth-from-tail
 /// `HistoryCell::User` so the user can see which turn Esc-Esc-Enter will
 /// roll back to. The mode also disables sticky-tail (we want the user to
@@ -423,8 +424,13 @@ impl ModalView for LiveTranscriptOverlay {
                     self.pending_g = false;
                     return ViewAction::None;
                 }
-                // Ctrl+T toggles the overlay closed when already open.
-                KeyCode::Char('t') | KeyCode::Char('T') => return ViewAction::Close,
+                // Ctrl+Shift+T toggles the overlay closed when already open.
+                KeyCode::Char('t') | KeyCode::Char('T')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.modifiers.contains(KeyModifiers::SHIFT) =>
+                {
+                    return ViewAction::Close;
+                }
                 _ => {}
             }
         }
@@ -708,9 +714,14 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_t_closes_when_already_open() {
+    fn ctrl_shift_t_closes_when_already_open() {
+        // The overlay toggle moved to Ctrl+Shift+T (Wave 7 M3: plain Ctrl+T
+        // now cycles reasoning effort).
         let mut v = LiveTranscriptOverlay::new();
-        let action = v.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        let action = v.handle_key(KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
         assert!(matches!(action, ViewAction::Close));
     }
 

@@ -75,6 +75,7 @@ mod project_context;
 mod project_context_cache;
 mod prompt_zones;
 mod prompts;
+mod provider_lake;
 mod purge;
 mod remote_setup;
 pub mod repl;

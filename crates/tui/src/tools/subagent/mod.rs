@@ -43,6 +43,7 @@ use crate::tools::todo::SharedTodoList;
 #[cfg(test)]
 use crate::tools::todo::TodoList;
 use crate::tools::truncate::{SPILLOVER_HEAD_BYTES, SPILLOVER_THRESHOLD_BYTES, maybe_spillover};
+use crate::tui::app::AppMode;
 use crate::tui::app::ReasoningEffort;
 use crate::utils::spawn_supervised;
 use crate::worker_profile::{ModelRoute, ShellPolicy, ToolScope, WorkerRuntimeProfile};
@@ -1526,6 +1527,8 @@ pub struct SubAgentRuntime {
     /// Work sidebar live. Without this, each child gets a fresh isolated
     /// list and the parent never sees child progress until completion.
     pub todos: SharedTodoList,
+    /// Session mode of the orchestrating parent at spawn time (Wave 7 M4/M5).
+    pub parent_mode: AppMode,
 }
 
 impl SubAgentRuntime {
@@ -1570,7 +1573,15 @@ impl SubAgentRuntime {
             tool_timeout: DEFAULT_TOOL_TIMEOUT,
             speech_output_dir: None,
             todos: crate::tools::todo::new_shared_todo_list(),
+            parent_mode: AppMode::Agent,
         }
+    }
+
+    /// Preserve the parent session mode for spawn-policy decisions.
+    #[must_use]
+    pub fn with_parent_mode(mut self, mode: AppMode) -> Self {
+        self.parent_mode = mode;
+        self
     }
 
     /// Attach the parent's shared todo list so sub-agent `checklist_update`
@@ -1757,6 +1768,7 @@ impl SubAgentRuntime {
             tool_timeout: self.tool_timeout,
             speech_output_dir: self.speech_output_dir.clone(),
             todos: self.todos.clone(),
+            parent_mode: self.parent_mode,
         }
     }
 
@@ -2385,6 +2397,30 @@ impl SubAgentManager {
         record.usage.budget_remaining_tokens = Some(scope.remaining);
         refresh_usage_note(&mut record.usage);
         self.refresh_budget_scope(&scope.scope_id);
+    }
+
+    /// Aggregate token spend for a shared workflow budget scope.
+    pub(crate) fn budget_spent_for_scope(&self, scope_id: &str) -> u64 {
+        self.aggregate_budget_spent(scope_id)
+    }
+
+    /// Attach a workflow child to the run-level shared budget pool.
+    pub(crate) fn attach_shared_budget_scope(
+        &mut self,
+        worker_id: &str,
+        scope_id: &str,
+        limit: u64,
+    ) {
+        let spent = self.aggregate_budget_spent(scope_id);
+        self.attach_budget_scope(
+            worker_id,
+            AgentUsageBudgetScope {
+                scope_id: scope_id.to_string(),
+                limit,
+                spent,
+                remaining: limit.saturating_sub(spent),
+            },
+        );
     }
 
     fn refresh_budget_scope(&mut self, scope_id: &str) {
@@ -3774,7 +3810,7 @@ impl ToolSpec for AgentTool {
                 return cancel_agent_from_input(&input, self.manager.clone(), context).await;
             }
         }
-        let snapshot =
+        let (snapshot, spawn_policy_note) =
             spawn_subagent_from_input(input, self.manager.clone(), self.runtime.clone()).await?;
         let worker_record = {
             let manager = self.manager.read().await;
@@ -3783,12 +3819,16 @@ impl ToolSpec for AgentTool {
         let projection = subagent_session_projection(snapshot, false, context, worker_record).await;
         let mut tool_result = ToolResult::json(&projection)
             .map_err(|e| ToolError::execution_failed(e.to_string()))?;
-        tool_result.metadata = Some(json!({
+        let mut metadata = json!({
             "status": projection.status,
             "terminal": projection.terminal,
             "context_mode": projection.context_mode,
             "prefix_cache": projection.prefix_cache,
-        }));
+        });
+        if let Some(note) = spawn_policy_note {
+            metadata["spawn_policy"] = json!(note);
+        }
+        tool_result.metadata = Some(metadata);
         Ok(tool_result)
     }
 }
@@ -3888,8 +3928,9 @@ async fn spawn_subagent_from_input(
     input: Value,
     manager: SharedSubAgentManager,
     runtime: SubAgentRuntime,
-) -> Result<SubAgentResult, ToolError> {
+) -> Result<(SubAgentResult, Option<String>), ToolError> {
     let mut spawn_request = parse_spawn_request(&input)?;
+    let spawn_policy_note = apply_session_spawn_policy(&runtime, &mut spawn_request);
     let profile_member = apply_spawn_profile(&mut spawn_request, &runtime.fleet_roster)?;
 
     if runtime.would_exceed_depth() {
@@ -3981,10 +4022,11 @@ async fn spawn_subagent_from_input(
         spawn_request.thinking,
     )
     .await;
-    child_runtime.model = route.model.clone();
+    let effective_model =
+        ensure_subagent_model_for_provider(&runtime, &route.model_route, route.model)?;
+    child_runtime.model = effective_model.clone();
     child_runtime.reasoning_effort = route.reasoning_effort.clone();
     child_runtime.reasoning_effort_auto = false;
-    let effective_model = route.model;
     let model_route = route.model_route;
 
     let mut manager_guard = manager.write().await;
@@ -4017,7 +4059,41 @@ async fn spawn_subagent_from_input(
         *owner = result.agent_id.clone();
     }
 
-    Ok(result)
+    Ok((result, spawn_policy_note))
+}
+
+/// Mode-aware spawn defaults for the root orchestrator (Wave 7 M4/M5).
+fn apply_session_spawn_policy(
+    runtime: &SubAgentRuntime,
+    request: &mut SpawnRequest,
+) -> Option<String> {
+    if runtime.spawn_depth > 0 {
+        return None;
+    }
+    match runtime.parent_mode {
+        AppMode::Multitask => {
+            // Background-friendly fan-out: when the operator did not specify
+            // strength or an exact model, prefer the faster sibling for parallel
+            // lookup/review children.
+            if !request.model_strength_explicit
+                && request.model.is_none()
+                && request.agent_type != SubAgentType::Explore
+            {
+                request.model_strength = SubAgentModelStrength::Faster;
+            }
+            None
+        }
+        AppMode::Operate => {
+            if request.profile.is_some() || request.agent_type_explicit {
+                return None;
+            }
+            Some(
+                "Operate spawn policy: pass profile=scout|builder|reviewer|verifier or use workflow for multi-step work; the operator orchestrates, workers execute."
+                    .to_string(),
+            )
+        }
+        _ => None,
+    }
 }
 
 /// Spawn one Workflow `task(...)` through the same path as the public `agent`
@@ -4056,7 +4132,9 @@ pub(crate) async fn spawn_workflow_task(
     if let Some(value) = request.token_budget {
         input["token_budget"] = json!(value);
     }
-    spawn_subagent_from_input(input, manager, runtime).await
+    spawn_subagent_from_input(input, manager, runtime)
+        .await
+        .map(|(result, _)| result)
 }
 
 // === Sub-agent Execution ===
@@ -6057,18 +6135,21 @@ pub(crate) fn normalize_requested_subagent_model(
     // #3018: Use provider-aware validation so non-DeepSeek providers can
     // accept their own model IDs instead of failing with "Expected a
     // DeepSeek model id".
-    crate::config::requested_model_for_provider(provider, trimmed).ok_or_else(|| {
-        let valid_names = crate::config::model_completion_names_for_provider(provider);
-        let valid_hint = if valid_names.is_empty() {
-            String::new()
-        } else {
-            format!(" (accepted: {})", valid_names.join(", "))
-        };
-        ToolError::invalid_input(format!(
-            "Invalid {field} '{trimmed}' for provider {}{valid_hint}",
-            provider_name_for_error(provider)
-        ))
-    })
+    let normalized =
+        crate::config::requested_model_for_provider(provider, trimmed).ok_or_else(|| {
+            let valid_names = crate::provider_lake::all_catalog_models_for_provider(provider);
+            let valid_hint = if valid_names.is_empty() {
+                String::new()
+            } else {
+                format!(" (accepted: {})", valid_names.join(", "))
+            };
+            ToolError::invalid_input(format!(
+                "Invalid {field} '{trimmed}' for provider {}{valid_hint}",
+                provider_name_for_error(provider)
+            ))
+        })?;
+    crate::config::validate_route(provider, &normalized).map_err(ToolError::invalid_input)?;
+    Ok(normalized)
 }
 
 fn provider_name_for_error(provider: crate::config::ApiProvider) -> &'static str {
@@ -6191,6 +6272,47 @@ fn fallback_subagent_assignment_route(
         prompt,
         &SubAgentType::General,
     )
+}
+
+/// Operator-visible model for the active provider when inherit/faster routing
+/// must not cross namespaces (#3227, subagent route validation 2026-07-07).
+fn operator_model_for_subagent(runtime: &SubAgentRuntime) -> String {
+    let provider = runtime.client.api_provider();
+    if crate::config::validate_route(provider, &runtime.model).is_ok() {
+        return runtime.model.clone();
+    }
+    if let Some(model) = crate::provider_lake::all_catalog_models_for_provider(provider)
+        .into_iter()
+        .next()
+    {
+        return model;
+    }
+    crate::config::model_completion_names_for_provider(provider)
+        .first()
+        .map(|model| (*model).to_string())
+        .unwrap_or_else(|| runtime.model.clone())
+}
+
+/// Reject or remap a resolved sub-agent model so it matches the runtime
+/// provider before spawn. Explicit fixed pins fail fast; inherit/faster/auto
+/// fall back to the operator route instead of cross-wiring namespaces.
+pub(crate) fn ensure_subagent_model_for_provider(
+    runtime: &SubAgentRuntime,
+    model_route: &ModelRoute,
+    model: String,
+) -> Result<String, ToolError> {
+    let provider = runtime.client.api_provider();
+    if crate::config::validate_route(provider, &model).is_ok() {
+        return Ok(model);
+    }
+    match model_route {
+        ModelRoute::Inherit | ModelRoute::Faster | ModelRoute::Auto => {
+            Ok(operator_model_for_subagent(runtime))
+        }
+        ModelRoute::Fixed(_) => Err(ToolError::invalid_input(
+            crate::config::validate_route(provider, &model).unwrap_err(),
+        )),
+    }
 }
 
 fn worker_profile_subagent_assignment_route(

@@ -29,10 +29,10 @@ use std::time::Duration;
 use crate::commands;
 #[cfg(test)]
 use crate::config::ApiProvider;
-#[cfg(test)]
-use crate::config::model_completion_names_for_provider;
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
+#[cfg(test)]
+use crate::provider_lake::all_catalog_models_for_provider;
 use crate::tui::app::{App, AppMode, ComposerDensity, VimMode};
 use crate::tui::approval::{
     ApprovalRequest, ApprovalView, ElevationOption, ElevationRequest, RiskLevel, ToolCategory,
@@ -619,9 +619,8 @@ impl<'a> ComposerWidget<'a> {
 
     fn mode_color(&self) -> Color {
         match self.app.mode {
-            AppMode::Agent => palette::MODE_AGENT,
-            AppMode::Auto => palette::MODE_AGENT,
-            AppMode::Yolo => palette::MODE_YOLO,
+            AppMode::Agent | AppMode::Auto | AppMode::Multitask => palette::MODE_AGENT,
+            AppMode::Yolo | AppMode::Operate => palette::MODE_YOLO,
             AppMode::Plan => palette::MODE_PLAN,
         }
     }
@@ -1605,16 +1604,8 @@ fn build_approval_controls(
     controls.push(Line::from(vec![
         Span::raw("  "),
         Span::styled(
-            selection_hint_prefix(locale),
-            Style::default().fg(palette::TEXT_HINT),
-        ),
-        Span::styled(
-            selection_hint_value(locale),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
             footer_controls(locale),
-            Style::default().fg(palette::TEXT_HINT),
+            Style::default().fg(palette::TEXT_MUTED),
         ),
         if request.can_save_ask_rule() {
             Span::styled(save_ask_rule_hint(locale), Style::default().fg(shortcut))
@@ -1937,14 +1928,6 @@ fn save_ask_rule_hint(locale: Locale) -> &'static str {
         Locale::ZhHans => "  s 批准并保存询问规则",
         _ => "  s approve + save ask rule",
     }
-}
-
-fn selection_hint_prefix(locale: Locale) -> Cow<'static, str> {
-    tr(locale, MessageId::ApprovalChooseHint)
-}
-
-fn selection_hint_value(locale: Locale) -> Cow<'static, str> {
-    tr(locale, MessageId::ApprovalChooseAction)
 }
 
 struct ApprovalOptionRow {
@@ -2643,10 +2626,7 @@ pub(crate) fn slash_completion_hints(
     workspace: Option<&std::path::Path>,
     api_provider: ApiProvider,
 ) -> Vec<SlashMenuEntry> {
-    let model_candidates = model_completion_names_for_provider(api_provider)
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let model_candidates = all_catalog_models_for_provider(api_provider);
     slash_completion_hints_with_model_candidates(
         input,
         limit,
