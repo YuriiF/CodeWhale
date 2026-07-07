@@ -5107,7 +5107,21 @@ async fn run_subagent_task_emits_parent_completion_before_terminal_update() {
             .get_result(&agent_id)
             .expect("completed agent should be present")
     };
-    assert_eq!(snapshot.status, SubAgentStatus::Completed);
+    assert!(
+        matches!(snapshot.status, SubAgentStatus::Failed(_)),
+        "0 max_steps cannot produce a final summary, so the child must fail: {:?}",
+        snapshot.status
+    );
+}
+
+#[test]
+fn summarize_subagent_result_diagnoses_missing_completed_payload() {
+    let snap = make_snapshot(SubAgentStatus::Completed);
+    let summary = summarize_subagent_result(&snap);
+    assert!(
+        summary.contains("no final summary"),
+        "Completed without payload must not read as silent success: {summary}"
+    );
 }
 
 #[test]

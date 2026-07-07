@@ -4232,7 +4232,12 @@ async fn run_subagent_task(task: SubAgentTask) {
             // parent model can branch on `summary_kind`.
             let raw = summarize_subagent_result(res);
             let (summary, truncated) = stamp_subagent_summary(&raw);
-            let sentinel = subagent_done_sentinel(&task.agent_id, res, truncated);
+            let sentinel = match &res.status {
+                SubAgentStatus::Failed(error) => {
+                    subagent_failed_sentinel(&task.agent_id, error)
+                }
+                _ => subagent_done_sentinel(&task.agent_id, res, truncated),
+            };
             (summary, sentinel)
         }
         Err(err) => {
@@ -4255,9 +4260,15 @@ async fn run_subagent_task(task: SubAgentTask) {
 
     if let Some(mb) = task.runtime.mailbox.as_ref() {
         let envelope = match &result {
-            Ok(_) => MailboxMessage::Completed {
-                agent_id: task.agent_id.clone(),
-                summary: summary.clone(),
+            Ok(res) => match &res.status {
+                SubAgentStatus::Failed(error) => MailboxMessage::Failed {
+                    agent_id: task.agent_id.clone(),
+                    error: error.clone(),
+                },
+                _ => MailboxMessage::Completed {
+                    agent_id: task.agent_id.clone(),
+                    summary: summary.clone(),
+                },
             },
             Err(err) => MailboxMessage::Failed {
                 agent_id: task.agent_id.clone(),
@@ -4942,6 +4953,12 @@ async fn run_subagent(
     let mut consecutive_truncated_responses = 0;
     let mut latest_checkpoint: Option<SubAgentCheckpoint> = None;
     let mut tokens_used: u64 = 0;
+    // #4050: distinguish a real "the model chose to stop" exit (the `break`
+    // below) from loop exhaustion (running out of `max_steps` while still
+    // tool-calling). Only the former, with a non-empty final summary, is a
+    // genuine success; everything else must surface its stop reason instead of
+    // reporting a completed child with no payload.
+    let mut stopped_naturally = false;
 
     for _step in 0..max_steps {
         // Cooperative cancellation: bail if this session's token was cancelled
@@ -5403,6 +5420,7 @@ async fn run_subagent(
                     &agent_id,
                     format!("{}: complete", format_step_counter(steps, max_steps)),
                 );
+                stopped_naturally = true;
                 break;
             }
             continue;
@@ -5504,11 +5522,28 @@ async fn run_subagent(
     }
 
     release_resident_leases_for(&agent_id);
-    let status = SubAgentStatus::Completed;
+    let has_final_summary = final_result
+        .as_deref()
+        .map(|text| !text.trim().is_empty())
+        .unwrap_or(false);
+    // #4050: only a natural stop with a final summary is a real success.
+    let status = if stopped_naturally {
+        if has_final_summary {
+            SubAgentStatus::Completed
+        } else {
+            SubAgentStatus::Failed(
+                "child stopped without returning a final summary (its last turn produced no assistant text)".to_string(),
+            )
+        }
+    } else {
+        SubAgentStatus::Failed(format!(
+            "child reached its step limit ({steps} steps) without returning a final summary"
+        ))
+    };
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     latest_checkpoint = Some(build_subagent_checkpoint(
         &agent_id,
-        "completed",
+        subagent_status_name(&status),
         &messages,
         steps,
         false,
@@ -7265,7 +7300,9 @@ fn summarize_subagent_result(result: &SubAgentResult) -> String {
     }
     match (&result.status, result.result.as_ref()) {
         (SubAgentStatus::Completed, Some(text)) => text.clone(),
-        (SubAgentStatus::Completed, None) => "Completed (no output)".to_string(),
+        (SubAgentStatus::Completed, None) => {
+            "Completed (no final summary returned)".to_string()
+        }
         (SubAgentStatus::Interrupted(error), _) => format!("Interrupted: {error}"),
         (SubAgentStatus::Cancelled, _) => "Cancelled".to_string(),
         (SubAgentStatus::BudgetExhausted, _) => "Token budget exhausted".to_string(),
