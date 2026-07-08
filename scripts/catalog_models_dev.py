@@ -1,0 +1,355 @@
+#!/usr/bin/env python3
+"""Models.dev catalog refresh / snapshot automation for CodeWhale (#4117).
+
+Fetches the public Models.dev combined catalog and writes a *secret-free*
+JSON document suitable for:
+
+- offline bundled seed checks (`snapshot`)
+- local disk-cache dogfood (`refresh --write-cache`)
+
+This tool never accepts, prints, or persists API keys / auth headers.
+
+Usage examples:
+
+  # Dry-run: fetch + validate, print counts (no write)
+  scripts/catalog_models_dev.py refresh
+
+  # Write secret-free cache for local dogfood
+  scripts/catalog_models_dev.py refresh --write-cache /tmp/models-dev.cache.json
+
+  # Validate the in-repo offline seed still parses as Models.dev-shaped JSON
+  scripts/catalog_models_dev.py snapshot --check \\
+      crates/config/assets/models_dev.bundled.json
+
+  # Replace the offline seed (intentional maintainer action — large!)
+  scripts/catalog_models_dev.py snapshot --write \\
+      crates/config/assets/models_dev.bundled.json
+
+  # OpenRouter public /models listing (no key) into a cache file
+  scripts/catalog_models_dev.py refresh --provider openrouter \\
+      --sort newest --limit 100 --write-cache /tmp/openrouter.models.json
+
+Environment:
+  CODEWHALE_MODELS_DEV_URL   Override Models.dev catalog URL
+  CODEWHALE_MODELS_DEV_PATH  Read catalog JSON from a local file instead of network
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+DEFAULT_MODELS_DEV_URL = "https://models.dev/catalog.json"
+DEFAULT_OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+USER_AGENT = "CodeWhale-catalog-automation/0.8.68 (+https://github.com/Hmbown/CodeWhale)"
+FETCH_TIMEOUT_SECS = 60
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_json_bytes(raw: bytes, source: str) -> Any:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        die(f"{source}: not utf-8 ({exc})")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        die(f"{source}: invalid JSON ({exc})")
+
+
+def fetch_url(url: str) -> bytes:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            # Explicitly no Authorization header — public endpoints only.
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT_SECS) as resp:
+            # Refuse to follow into non-JSON surprise payloads larger than 64 MiB.
+            data = resp.read(64 * 1024 * 1024 + 1)
+            if len(data) > 64 * 1024 * 1024:
+                die(f"{url}: response exceeds 64 MiB safety cap")
+            ctype = resp.headers.get("Content-Type", "")
+            if "json" not in ctype.lower() and not data.lstrip().startswith((b"{", b"[")):
+                die(f"{url}: unexpected Content-Type {ctype!r}")
+            return data
+    except urllib.error.HTTPError as exc:
+        die(f"{url}: HTTP {exc.code} {exc.reason}")
+    except urllib.error.URLError as exc:
+        die(f"{url}: {exc.reason}")
+
+
+def load_models_dev_catalog() -> tuple[dict[str, Any], str]:
+    path_override = os.environ.get("CODEWHALE_MODELS_DEV_PATH", "").strip()
+    if path_override:
+        p = Path(path_override)
+        if not p.is_file():
+            die(f"CODEWHALE_MODELS_DEV_PATH not a file: {p}")
+        raw = p.read_bytes()
+        data = load_json_bytes(raw, str(p))
+        return ensure_models_dev_shape(data, str(p)), f"file:{p}"
+
+    url = os.environ.get("CODEWHALE_MODELS_DEV_URL", DEFAULT_MODELS_DEV_URL).strip()
+    if not url:
+        url = DEFAULT_MODELS_DEV_URL
+    raw = fetch_url(url)
+    data = load_json_bytes(raw, url)
+    return ensure_models_dev_shape(data, url), f"url:{url}"
+
+
+def ensure_models_dev_shape(data: Any, source: str) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        die(f"{source}: expected object root")
+    # Allow optional _meta (CodeWhale offline seed) and require models+providers
+    # when present so we never write a partial secret leak document.
+    models = data.get("models")
+    providers = data.get("providers")
+    if models is None and providers is None:
+        die(f"{source}: missing both 'models' and 'providers'")
+    if models is not None and not isinstance(models, dict):
+        die(f"{source}: 'models' must be an object")
+    if providers is not None and not isinstance(providers, dict):
+        die(f"{source}: 'providers' must be an object")
+    # Strip any accidental credential-shaped keys if a hand-edited file had them.
+    scrubbed = scrub_secrets(data)
+    return scrubbed
+
+
+def scrub_secrets(node: Any) -> Any:
+    """Drop keys that look like credentials; never persist auth material."""
+    banned_exact = {
+        "api_key",
+        "apiKey",
+        "authorization",
+        "Authorization",
+        "token",
+        "access_token",
+        "refresh_token",
+        "secret",
+        "password",
+        "client_secret",
+    }
+    if isinstance(node, dict):
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if key in banned_exact or key.lower().endswith("_api_key"):
+                continue
+            out[key] = scrub_secrets(value)
+        return out
+    if isinstance(node, list):
+        return [scrub_secrets(item) for item in node]
+    return node
+
+
+def catalog_stats(data: dict[str, Any]) -> str:
+    models = data.get("models") or {}
+    providers = data.get("providers") or {}
+    offerings = 0
+    if isinstance(providers, dict):
+        for prov in providers.values():
+            if isinstance(prov, dict):
+                models_map = prov.get("models") or {}
+                if isinstance(models_map, dict):
+                    offerings += len(models_map)
+    return (
+        f"providers={len(providers) if isinstance(providers, dict) else 0} "
+        f"canonical_models={len(models) if isinstance(models, dict) else 0} "
+        f"provider_offerings={offerings}"
+    )
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def cmd_refresh(args: argparse.Namespace) -> None:
+    if args.provider and args.provider.lower() == "openrouter":
+        refresh_openrouter(args)
+        return
+    if args.provider:
+        die(
+            f"unsupported --provider {args.provider!r} "
+            "(supported: openrouter, or omit for Models.dev)"
+        )
+
+    data, source = load_models_dev_catalog()
+    print(f"loaded Models.dev catalog from {source}")
+    print(catalog_stats(data))
+    if args.write_cache:
+        out = Path(args.write_cache)
+        write_json(out, data)
+        print(f"wrote secret-free cache: {out}")
+    elif args.write:
+        # Alias for maintainers who remember snapshot wording.
+        out = Path(args.write)
+        write_json(out, data)
+        print(f"wrote: {out}")
+    else:
+        print("dry-run (pass --write-cache PATH to persist)")
+
+
+def refresh_openrouter(args: argparse.Namespace) -> None:
+    url = DEFAULT_OPENROUTER_MODELS_URL
+    raw = fetch_url(url)
+    data = load_json_bytes(raw, url)
+    if not isinstance(data, dict) or "data" not in data:
+        die(f"{url}: expected {{ data: [...] }} envelope")
+    rows = data["data"]
+    if not isinstance(rows, list):
+        die(f"{url}: data is not a list")
+
+    # Optional sort / limit for local inspection — never secrets.
+    if args.sort == "newest":
+        def created_key(row: Any) -> float:
+            if not isinstance(row, dict):
+                return 0.0
+            created = row.get("created")
+            try:
+                return float(created)
+            except (TypeError, ValueError):
+                return 0.0
+
+        rows = sorted(rows, key=created_key, reverse=True)
+    if args.limit is not None and args.limit > 0:
+        rows = rows[: args.limit]
+
+    payload = {
+        "_meta": {
+            "source": "openrouter.ai/api/v1/models",
+            "note": "Public model listing for cache dogfood; not the Models.dev SoT.",
+            "count": len(rows),
+            "sort": args.sort,
+            "limit": args.limit,
+        },
+        "data": scrub_secrets(rows),
+    }
+    print(f"loaded OpenRouter models: {len(rows)} rows (sort={args.sort}, limit={args.limit})")
+    if args.write_cache:
+        out = Path(args.write_cache)
+        write_json(out, payload)
+        print(f"wrote secret-free cache: {out}")
+    else:
+        print("dry-run (pass --write-cache PATH to persist)")
+
+
+def cmd_snapshot(args: argparse.Namespace) -> None:
+    target = Path(args.path)
+    if args.check:
+        if not target.is_file():
+            die(f"--check: missing {target}")
+        raw = target.read_bytes()
+        data = load_json_bytes(raw, str(target))
+        ensure_models_dev_shape(data, str(target))
+        print(f"ok: {target} is Models.dev-shaped ({catalog_stats(data)})")
+        return
+
+    data, source = load_models_dev_catalog()
+    print(f"loaded Models.dev catalog from {source}")
+    print(catalog_stats(data))
+    if args.write:
+        # Preserve maintainer honesty: full live dump is large. Require
+        # --force-full when overwriting the compact offline seed asset.
+        seed = Path("crates/config/assets/models_dev.bundled.json")
+        if target.resolve() == seed.resolve() and not args.force_full:
+            die(
+                "refusing to overwrite the compact offline seed with a full live dump; "
+                "pass --force-full if you intentionally want that (large binary embed), "
+                "or write to another path"
+            )
+        write_json(target, data)
+        print(f"wrote snapshot: {target}")
+    else:
+        print("dry-run (pass --write to persist, or --check PATH to validate an existing file)")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Secret-free Models.dev / OpenRouter catalog automation (#4117)"
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    refresh = sub.add_parser("refresh", help="Fetch live catalog / provider models")
+    refresh.add_argument(
+        "--provider",
+        default=None,
+        help="Optional provider id (currently: openrouter). Omit for Models.dev.",
+    )
+    refresh.add_argument(
+        "--sort",
+        default="newest",
+        choices=["newest", "none"],
+        help="OpenRouter sort order (default: newest)",
+    )
+    refresh.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="OpenRouter row cap (default: 100; 0 = no cap)",
+    )
+    refresh.add_argument(
+        "--write-cache",
+        metavar="PATH",
+        help="Write secret-free JSON cache to PATH",
+    )
+    refresh.add_argument(
+        "--write",
+        metavar="PATH",
+        help="Alias of --write-cache for Models.dev payloads",
+    )
+    refresh.set_defaults(func=cmd_refresh)
+
+    snapshot = sub.add_parser(
+        "snapshot",
+        help="Validate or write a Models.dev-shaped snapshot document",
+    )
+    snapshot.add_argument(
+        "path",
+        nargs="?",
+        default="crates/config/assets/models_dev.bundled.json",
+        help="Snapshot path (default: offline seed asset)",
+    )
+    snapshot.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate existing file only (no network)",
+    )
+    snapshot.add_argument(
+        "--write",
+        action="store_true",
+        help="Write a freshly fetched Models.dev catalog to path",
+    )
+    snapshot.add_argument(
+        "--force-full",
+        action="store_true",
+        help="Allow overwriting the compact offline seed with a full live dump",
+    )
+    snapshot.set_defaults(func=cmd_snapshot)
+    return p
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
