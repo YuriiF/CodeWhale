@@ -2857,15 +2857,17 @@ fn agent_inspection_stays_compact_in_transcript_mode() {
 }
 
 #[test]
-fn agent_spawn_keeps_full_block_in_transcript_mode() {
+fn agent_spawn_suppresses_generic_card_in_favor_of_delegate_card() {
     let cell = agent_cell(
         Some("prompt: map the repo"),
         ToolStatus::Success,
         Some(r#"{"agent_id":"agent_scout_1","status":"running"}"#),
     );
-    let lines = cell.lines_with_mode(120, true, super::RenderMode::Transcript);
-    assert!(
-        lines.len() > 1,
-        "spawns keep the full block for session replay: {lines:?}"
-    );
+    for mode in [super::RenderMode::Live, super::RenderMode::Transcript] {
+        let lines = cell.lines_with_mode(120, true, mode);
+        assert!(
+            lines.is_empty(),
+            "spawn generic tool card must yield to DelegateCard (#4133): {mode:?} {lines:?}"
+        );
+    }
 }

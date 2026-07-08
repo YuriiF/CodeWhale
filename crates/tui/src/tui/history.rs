@@ -1319,19 +1319,16 @@ impl GenericToolCell {
         }
 
         // Sub-agent launch already gets a dedicated `DelegateCard`
-        // that owns the live action tree, status, and final summary. The
-        // generic tool block for the same call duplicates that signal at
-        // 3-4 lines per spawn — N parallel spawns multiply the noise. In
-        // live mode, render one compact summary line and let the
-        // DelegateCard be the source of truth. Transcript mode keeps the
-        // full block for spawns so session replay remains complete, but
-        // inspection calls (peek/status/wait) stay compact there too — a
-        // full projection dump per check is exactly the dogfood-A5 noise
-        // and carries no replay value (#4112).
-        if self.name == "agent"
-            && (matches!(mode, RenderMode::Live) || agent_activity::is_agent_inspection(self))
-        {
-            return agent_activity::render_agent_compact(self, low_motion);
+        // that owns the live action tree, status, and final summary (#4133).
+        // Spawns therefore render nothing here in either mode — one visible
+        // artifact per delegated unit. Inspection/join calls (peek/status/
+        // wait) stay as a single compact line (#4112 dogfood A5).
+        if self.name == "agent" {
+            if agent_activity::is_agent_inspection(self) {
+                return agent_activity::render_agent_compact(self, low_motion);
+            }
+            // Spawn / start / run: suppress the generic tool card entirely.
+            return Vec::new();
         }
 
         // A call to a tool that doesn't exist carries exactly one useful

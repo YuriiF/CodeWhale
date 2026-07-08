@@ -260,6 +260,14 @@ pub enum Event {
         blocked_write: bool,
     },
 
+    /// Observable LSP repair-loop update for the Turn Inspector (#4107).
+    /// Carries only summary counts/state — never raw prompt internals.
+    LspRepairUpdate {
+        diagnostics_found: usize,
+        files: usize,
+        injected: bool,
+    },
+
     // === Prefix-Cache Stability Events ===
     /// The prefix (system prompt + tool specs) changed between turns,
     /// which invalidates DeepSeek's KV prefix cache. Carries diagnostics

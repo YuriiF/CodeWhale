@@ -381,6 +381,30 @@ pub struct AgentProgressMeta {
     pub spawn_depth: u32,
 }
 
+/// Per-turn LSP repair-loop summary for the Turn Inspector (#4107).
+/// Observable state only — no raw diagnostic text or prompt internals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspRepairState {
+    pub diagnostics_found: usize,
+    pub files_touched: usize,
+    pub injected: bool,
+    pub repair_attempted: bool,
+    /// "resolved" | "still_failing" | "unknown" | "unavailable"
+    pub latest: &'static str,
+}
+
+impl Default for LspRepairState {
+    fn default() -> Self {
+        Self {
+            diagnostics_found: 0,
+            files_touched: 0,
+            injected: false,
+            repair_attempted: false,
+            latest: "unavailable",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposerDensity {
     Compact,
@@ -2200,6 +2224,8 @@ pub struct App {
     /// Whether LSP diagnostics are currently enabled. Mirrors the config file
     /// `[lsp].enabled` setting. Toggled at runtime via `/lsp on|off`.
     pub lsp_enabled: bool,
+    /// Current-turn LSP repair-loop summary for Ctrl-O Turn Inspector (#4107).
+    pub lsp_repair: LspRepairState,
     /// Derived title for the current session shown in the composer border.
     /// Updated when `EngineEvent::SessionUpdated` fires or a saved session is loaded.
     pub session_title: Option<String>,
@@ -2944,6 +2970,7 @@ impl App {
             collapsed_cell_map: Vec::new(),
             edit_in_progress: false,
             lsp_enabled: config.lsp.as_ref().and_then(|l| l.enabled).unwrap_or(true),
+            lsp_repair: LspRepairState::default(),
             composer_arrows_scroll: config
                 .tui
                 .as_ref()

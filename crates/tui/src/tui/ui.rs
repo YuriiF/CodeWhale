@@ -2500,6 +2500,7 @@ async fn run_event_loop(
                         app.is_loading = true;
                         app.offline_mode = false;
                         app.turn_error_posted = false;
+                        app.lsp_repair = crate::tui::app::LspRepairState::default();
                         app.prompt_suggestion = None;
                         app.prompt_suggestion_gen
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2998,6 +2999,35 @@ async fn run_event_loop(
                             if !description.is_empty() {
                                 app.last_prefix_change_desc = Some(description);
                             }
+                        }
+                    }
+                    EngineEvent::LspRepairUpdate {
+                        diagnostics_found,
+                        files,
+                        injected,
+                    } => {
+                        let repair = &mut app.lsp_repair;
+                        repair.diagnostics_found =
+                            repair.diagnostics_found.saturating_add(diagnostics_found);
+                        repair.files_touched = repair.files_touched.saturating_add(files);
+                        if injected {
+                            // Injection itself is not a repair attempt — the model
+                            // has only been shown the diagnostics so far (#4107).
+                            repair.injected = true;
+                            if repair.latest == "unavailable" || repair.latest.is_empty() {
+                                repair.latest = "unknown";
+                            }
+                        } else if repair.injected {
+                            // Diagnostics after a prior injection imply the model
+                            // edited again (a repair attempt). Zero findings = resolved.
+                            repair.repair_attempted = true;
+                            repair.latest = if diagnostics_found == 0 {
+                                "resolved"
+                            } else {
+                                "still_failing"
+                            };
+                        } else {
+                            repair.latest = "unknown";
                         }
                     }
                     EngineEvent::PauseEvents { ack } => {

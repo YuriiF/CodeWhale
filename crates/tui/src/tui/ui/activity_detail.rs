@@ -1430,17 +1430,48 @@ fn turn_files_changed(app: &App, start: usize, end: usize) -> Vec<String> {
     lines
 }
 
-/// Section 5 — diagnostics / LSP repair loop.
+/// Section 5 — diagnostics / LSP repair loop (#4107).
 ///
-/// Structured per-turn LSP repair state is not surfaced to the TUI yet
-/// (issue #4106), so this degrades to the coarse enable flag rather than a
-/// blank section.
+/// Shows the observable repair loop when LSP produced diagnostics this turn.
+/// Stays quiet when LSP is disabled or no diagnostics were found.
 fn turn_diagnostics_lines(app: &App) -> Vec<String> {
-    if app.lsp_enabled {
-        vec!["LSP enabled — no repair-loop details surfaced yet (see #4106)".to_string()]
-    } else {
-        vec!["LSP disabled".to_string()]
+    if !app.lsp_enabled {
+        return Vec::new();
     }
+    let repair = &app.lsp_repair;
+    if repair.diagnostics_found == 0 && !repair.injected && !repair.repair_attempted {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    if repair.diagnostics_found > 0 {
+        lines.push(format!(
+            "Found {} diagnostic{} across {} file{}",
+            repair.diagnostics_found,
+            if repair.diagnostics_found == 1 {
+                ""
+            } else {
+                "s"
+            },
+            repair.files_touched.max(1),
+            if repair.files_touched == 1 { "" } else { "s" },
+        ));
+    }
+    lines.push(if repair.injected {
+        "Injected into the next model request".to_string()
+    } else {
+        "Queued — not yet injected".to_string()
+    });
+    if repair.repair_attempted {
+        lines.push("Model attempted a repair after injection".to_string());
+    }
+    let latest = match repair.latest {
+        "resolved" => "Latest: resolved",
+        "still_failing" => "Latest: still failing",
+        "unavailable" => "Latest: unavailable",
+        _ => "Latest: unknown",
+    };
+    lines.push(latest.to_string());
+    lines
 }
 
 /// Section 6 — tests / verifier results.
@@ -1588,4 +1619,67 @@ fn turn_result_lines(app: &App, start: usize, end: usize) -> Vec<String> {
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::tui::app::{App, LspRepairState, TuiOptions};
+    use std::path::PathBuf;
+
+    fn test_app() -> App {
+        let options = TuiOptions {
+            model: "deepseek-v4-flash".to_string(),
+            workspace: PathBuf::from("."),
+            config_path: None,
+            config_profile: None,
+            allow_shell: false,
+            use_alt_screen: true,
+            use_mouse_capture: false,
+            use_bracketed_paste: true,
+            max_subagents: 1,
+            skills_dir: PathBuf::from("."),
+            memory_path: PathBuf::from("memory.md"),
+            notes_path: PathBuf::from("notes.txt"),
+            mcp_config_path: PathBuf::from("mcp.json"),
+            use_memory: false,
+            start_in_agent_mode: true,
+            skip_onboarding: true,
+            yolo: false,
+            resume_session_id: None,
+            initial_input: None,
+        };
+        App::new(options, &Config::default())
+    }
+
+    #[test]
+    fn turn_diagnostics_lines_quiet_when_no_activity() {
+        let mut app = test_app();
+        app.lsp_enabled = true;
+        assert!(turn_diagnostics_lines(&app).is_empty());
+        app.lsp_enabled = false;
+        assert!(turn_diagnostics_lines(&app).is_empty());
+    }
+
+    #[test]
+    fn turn_diagnostics_lines_summarize_repair_loop() {
+        let mut app = test_app();
+        app.lsp_enabled = true;
+        app.lsp_repair = LspRepairState {
+            diagnostics_found: 2,
+            files_touched: 1,
+            injected: true,
+            repair_attempted: true,
+            latest: "still_failing",
+        };
+        let joined = turn_diagnostics_lines(&app).join("\n");
+        assert!(joined.contains("Found 2 diagnostics"), "{joined}");
+        assert!(
+            joined.contains("Injected into the next model request"),
+            "{joined}"
+        );
+        assert!(joined.contains("Model attempted a repair"), "{joined}");
+        assert!(joined.contains("still failing"), "{joined}");
+    }
 }
