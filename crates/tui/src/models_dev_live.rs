@@ -588,8 +588,8 @@ mod tests {
         clear_live_snapshot();
     }
 
-    #[tokio::test]
-    async fn network_failure_keeps_prior_rows() {
+    #[test]
+    fn network_failure_keeps_prior_rows() {
         let _lock = lock_test_env();
         clear_live_snapshot();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -598,7 +598,12 @@ mod tests {
 
         let _home = EnvVarGuard::set("CODEWHALE_HOME", dir.path().join("home"));
         let _path = EnvVarGuard::set(ENV_MODELS_DEV_PATH, &path);
-        let count = refresh(true).await.expect("seed from path");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let count = rt.block_on(refresh(true)).expect("seed from path");
         assert!(count >= 2);
 
         // Point at a dead URL and force network (clear path override).
@@ -606,7 +611,7 @@ mod tests {
         let _disable = EnvVarGuard::remove(ENV_DISABLE_FETCH);
         let _url = EnvVarGuard::set(ENV_MODELS_DEV_URL, "http://127.0.0.1:1");
 
-        let err = refresh(true).await.expect_err("dead URL");
+        let err = rt.block_on(refresh(true)).expect_err("dead URL");
         assert!(matches!(err, ModelsDevRefreshError::Network(_)));
 
         let together = all_catalog_models_for_provider(ApiProvider::Together);

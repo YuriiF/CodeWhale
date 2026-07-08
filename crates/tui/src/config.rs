@@ -1101,6 +1101,14 @@ pub fn wire_model_for_provider(provider: ApiProvider, model: &str) -> String {
     normalize_model_name_for_provider(provider, trimmed).unwrap_or_else(|| trimmed.to_string())
 }
 
+/// Hardcoded per-provider model id list used **only as a compatibility
+/// fallback** (#4188).
+///
+/// Preferred sources are the live Models.dev catalog and the offline bundled
+/// snapshot via [`crate::provider_lake`]. Call this directly only for
+/// CodeWhale-only / local providers Models.dev does not represent, or when
+/// probing the fallback table in tests. Picker, inventory, and subagent
+/// surfaces must go through the provider lake.
 #[must_use]
 pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'static str> {
     match provider {

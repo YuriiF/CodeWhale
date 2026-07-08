@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Demote the bundled Models.dev snapshot to an offline/stale fallback after
+  live catalog refresh (#4188). ProviderLake precedence is live Models.dev >
+  bundled seed > legacy hardcoded completion names; pickers, inventory, and
+  subagent validation stay catalog-backed, and CodeWhale-only providers keep
+  defaults when Models.dev has no rows.
+
 ### Added
 
 - Workflow runs are now durable: every run appends to a

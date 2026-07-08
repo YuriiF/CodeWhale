@@ -521,7 +521,7 @@ fn snapshot_feeds_route_resolver_offerings() {
 }
 
 // ---------------------------------------------------------------------------
-// #3385: the committed bundled Models.dev asset.
+// #3385 / #4188: the committed offline/stale bundled Models.dev asset.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -537,6 +537,30 @@ fn bundled_asset_parses() {
     );
     // The helper returns the same parsed catalog.
     assert_eq!(bundled_models_dev_catalog(), catalog);
+}
+
+#[test]
+fn bundled_asset_meta_describes_offline_fallback_not_competing_truth() {
+    // #4188: the asset must document itself as offline/stale fallback, not a
+    // competing curated source of truth alongside live Models.dev.
+    let raw: serde_json::Value =
+        serde_json::from_str(BUNDLED_MODELS_DEV_JSON).expect("bundled JSON");
+    let meta = raw
+        .get("_meta")
+        .and_then(|m| m.as_object())
+        .expect("_meta object");
+    let role = meta
+        .get("role")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        role.to_ascii_lowercase().contains("not a competing"),
+        "_meta.role must demote the bundled asset: {role}"
+    );
+    assert!(
+        role.to_ascii_lowercase().contains("live"),
+        "_meta.role must point at live Models.dev preference: {role}"
+    );
 }
 
 #[test]

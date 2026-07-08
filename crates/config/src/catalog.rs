@@ -6,13 +6,16 @@
 //! refresh) and live [`ProviderCatalogDelta`]s; the HTTP `/models` fetch layer
 //! lives above this module. Nothing here performs I/O or reads credentials.
 //!
-//! Layering (lowest precedence first):
+//! Layering (lowest precedence first; #4188):
 //!
 //! ```text
-//! bundled Models.dev snapshot / built-in seeds
-//!   < provider live `/models` cache  (scoped per provider + base-URL fingerprint)
+//! bundled Models.dev snapshot       (offline/stale fallback only — not competing truth)
+//!   < live Models.dev / provider `/models` cache
 //!   < user / custom overrides        (custom endpoints, pinned models, explicit facts)
 //! ```
+//!
+//! After #4187, live Models.dev rows are preferred whenever present. The bundled
+//! asset remains so offline startup and failed refreshes still resolve defaults.
 //!
 //! Invariants preserved from #2608 / #3497:
 //! - A catalog row is **not** an executable route. Rows still compile through
@@ -41,7 +44,8 @@ use crate::route::{ModelId, ProviderId, ProviderModelOffering, RouteLimits, Wire
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CatalogSource {
-    /// Bundled, network-free seed (a Models.dev snapshot or built-in defaults).
+    /// Offline/stale bundled seed (Models.dev-shaped snapshot). Not competing
+    /// truth — live Models.dev rows override this layer (#4188).
     #[default]
     Bundled,
     /// A provider live `/models` row, scoped to a base-URL fingerprint and the
@@ -146,15 +150,15 @@ impl CatalogOffering {
     }
 }
 
-/// The committed, network-free Models.dev-shaped catalog snapshot (#3385).
+/// Committed offline/stale Models.dev-shaped catalog snapshot (#3385 / #4188).
 ///
-/// Curated from in-repo verified model facts (context windows / output caps from
-/// `crates/tui/src/models.rs`, USD pricing from `crates/tui/src/pricing.rs`)
-/// rather than a live models.dev dump, because the public catalog tracks a
-/// different real model generation than CodeWhale's curated forward-dated set.
-/// This is the default bundled layer feeding [`crate::route::RouteResolver::new`].
-/// See the asset's `_meta` block for sourcing and the honesty rule on omitted
-/// pricing (`UnknownOrStale`, never a fabricated zero).
+/// This is **not** a competing curated source of truth. Preferred metadata comes
+/// from the live Models.dev catalog (#4187). The bundled asset is a compact
+/// network-free seed of verified in-repo defaults (context/output from
+/// `crates/tui/src/models.rs`, USD pricing from `crates/tui/src/pricing.rs`) so
+/// [`crate::route::RouteResolver::new`] and pickers still work offline or after
+/// a failed refresh. See the asset's `_meta.role` / `_meta.source` and the
+/// honesty rule on omitted pricing (`UnknownOrStale`, never a fabricated zero).
 pub const BUNDLED_MODELS_DEV_JSON: &str = include_str!("../assets/models_dev.bundled.json");
 
 /// Parse the committed bundled Models.dev snapshot.
@@ -169,11 +173,11 @@ pub fn bundled_models_dev_catalog() -> ModelsDevCatalog {
         .expect("committed bundled Models.dev asset must be valid JSON")
 }
 
-/// The bundled-layer [`CatalogOffering`] rows from the committed snapshot.
+/// Bundled-layer [`CatalogOffering`] rows from the offline snapshot (#4188).
 ///
-/// This is the real-data source for the default resolver: every text-chat row
-/// from [`BUNDLED_MODELS_DEV_JSON`], tagged [`CatalogSource::Bundled`], with
-/// honest limits and pricing.
+/// Lowest-precedence catalog layer: every text-chat row from
+/// [`BUNDLED_MODELS_DEV_JSON`], tagged [`CatalogSource::Bundled`]. Live Models.dev
+/// rows override these on `(provider, wire_model_id)` when available.
 #[must_use]
 pub fn bundled_catalog_offerings() -> Vec<CatalogOffering> {
     bundled_offerings_from_models_dev(&bundled_models_dev_catalog())
