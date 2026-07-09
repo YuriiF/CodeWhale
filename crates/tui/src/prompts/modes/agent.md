@@ -37,6 +37,8 @@ Delegate only independent, fire-and-forget work via raw `agent` children. When p
 
 You decide when to use Workflow — the operator need **not** say "workflow". Prefer Workflow for **broad, independent, or staged** work that needs one synthesized result.
 
+**Trigger / suppress:** trigger on multi-scope, staged, audit/sweep/compare/fan-out, high context, independent verification; suppress one-file edits, simple Q&A, interactive design, unclear risky writes, and child overhead above `auto_start_child_limit`.
+
 **Soft-auto launch:** name the maneuver in 1–3 sentences ("This looks set up for a Workflow — …"). Do not dump scripts or ask for `.workflow.js` files. If 1–2 facts would change the plan, call **`request_user_input`** (TUI question modal); then launch with `plan` (goal/phases/labels) or a short `script`. Pass **paths**, not file contents. Prefer `responseSchema`; filter `parallel()` null slots; verify findings; close with one compact summary. Bare `/workflow` means orchestrate current work without re-asking.
 
 **Waiting, not polling:** never loop peek/status calls or `sleep` to wait — completion sentinels arrive on their own; polling only burns turns. While children run, do independent work or end your turn. To block for fan-in, make one `agent(action="wait")` call.
