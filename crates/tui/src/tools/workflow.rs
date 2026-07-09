@@ -185,10 +185,16 @@ enum WorkflowUiEventKind {
 struct WorkflowTaskStartedEvent {
     task_id: String,
     label: Option<String>,
+    /// Fleet role declared on the step, if any (#4177).
+    role: Option<String>,
     profile: Option<String>,
     model: Option<String>,
     strength: Option<String>,
     thinking: Option<String>,
+    /// Resolved fleet role after roster lookup (#4177).
+    resolved_role: Option<String>,
+    /// Resolved AgentProfile id after fleet resolution (#4177).
+    resolved_profile: Option<String>,
     resolved_provider: String,
     resolved_model: String,
     route_source: String,
@@ -862,6 +868,9 @@ struct StructuredPlanChild {
     prompt: String,
     #[serde(default, alias = "type", alias = "agent_type")]
     agent_type: Option<String>,
+    /// Fleet role name (#4177). Preferred step identity; resolved via roster.
+    #[serde(default)]
+    role: Option<String>,
     #[serde(default)]
     profile: Option<String>,
     #[serde(default)]
@@ -1069,6 +1078,12 @@ fn plan_children_to_leaves(
                 )));
             }
         };
+        let role = child
+            .role
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(|r| r.to_ascii_lowercase());
         let profile = child
             .profile
             .as_deref()
@@ -1079,6 +1094,7 @@ fn plan_children_to_leaves(
             id,
             prompt: prompt.to_string(),
             agent_type,
+            role,
             profile,
             mode,
             isolation: Default::default(),
@@ -1350,6 +1366,7 @@ impl DeclarativeWorkflowLowerer {
                 ),
                 "general",
                 None,
+                None,
                 false,
                 None,
                 &spec.id,
@@ -1419,6 +1436,7 @@ fn leaf_task_options_expression(
     Ok(task_options_expression(
         leaf_description_expression(spec),
         leaf_subagent_type(spec)?,
+        spec.role.as_deref(),
         spec.profile.as_deref(),
         // Parallel write-capable children default to worktree isolation (#4120).
         // Explicit isolation: shared is the approved same-worktree override.
@@ -1539,6 +1557,7 @@ fn is_write_or_shell_tool(tool: &str) -> bool {
 fn task_options_expression(
     description_expr: String,
     subagent_type: &str,
+    role: Option<&str>,
     profile: Option<&str>,
     worktree: bool,
     token_budget: Option<u64>,
@@ -1553,6 +1572,9 @@ fn task_options_expression(
     ];
     if let Some(phase) = phase {
         fields.push(format!("phase: {}", js_string(phase)));
+    }
+    if let Some(role) = role {
+        fields.push(format!("role: {}", js_string(role)));
     }
     if let Some(profile) = profile {
         fields.push(format!("profile: {}", js_string(profile)));
@@ -1765,10 +1787,20 @@ impl SubAgentWorkflowDriver {
             Box::new(WorkflowTaskStartedEvent {
                 task_id: agent_id.to_string(),
                 label,
+                role: request.role.clone(),
                 profile: request.profile.clone(),
                 model: request.model.clone(),
                 strength: request.model_strength.clone(),
                 thinking: request.thinking.clone(),
+                // Prefer spawn metadata (fleet-resolved); fall back to request.
+                resolved_role: metadata
+                    .resolved_role
+                    .clone()
+                    .or_else(|| request.role.clone()),
+                resolved_profile: metadata
+                    .resolved_profile
+                    .clone()
+                    .or_else(|| request.profile.clone()),
                 resolved_provider: metadata.resolved_provider.clone(),
                 resolved_model: metadata.resolved_model.clone(),
                 route_source: metadata.route_source.clone(),
@@ -2121,6 +2153,7 @@ fn push_leaf_execution(
         task_id: record
             .map(|record| record.agent_id.clone())
             .unwrap_or_else(|| spec.id.clone()),
+        role: spec.role.clone(),
         profile: spec.profile.clone(),
         status,
         usage: WorkflowUsage::default(),

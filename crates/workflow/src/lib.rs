@@ -9,6 +9,7 @@ mod js_authoring;
 mod model_policy;
 mod named_fleet;
 mod replay;
+mod role_resolve;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -30,6 +31,10 @@ pub use named_fleet::{
     parse_named_fleet,
 };
 pub use replay::*;
+pub use role_resolve::{
+    FleetRoleMap, FleetRoleResolveError, ResolvedWorkflowAgent, normalize_token,
+    resolve_workflow_agent, validate_role_token,
+};
 
 /// Default hard ceiling on total agents a Fleet-shaped Workflow plan may launch.
 /// Matches the imperative VM lifetime cap (1_000 agents per run).
@@ -140,10 +145,18 @@ pub struct LeafSpec {
     pub prompt: String,
     #[serde(default)]
     pub agent_type: AgentType,
+    /// Fleet role this step should run as (e.g. `scout`, `implementer`).
+    /// Resolved via the fleet roster at dispatch time (#4177). Preferred
+    /// identity field for workflow steps; `profile` remains an explicit
+    /// AgentProfile override. Provider/model live on [`ModelPolicy`] as
+    /// optional overrides — they are **not** required identity fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// Named Fleet roster profile this agent should run as. Resolved against
     /// the saved Fleet roster at dispatch time; unknown names fail validation
     /// before any spawn. When set, role/model/loadout defaults come from the
     /// roster member; explicit fields on this spec override the profile.
+    /// Precedence over `role` when both are set (#4177 / #4111).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     #[serde(default)]
@@ -555,6 +568,9 @@ pub struct BranchResult {
 pub struct LeafResult {
     pub leaf_id: String,
     pub task_id: String,
+    /// Fleet role the leaf was declared to run as, if any (#4177).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// Fleet roster profile the leaf was declared to run as, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -935,6 +951,7 @@ impl MockWorkflowExecutor {
         execution.leaf_results.push(LeafResult {
             leaf_id: spec.id.clone(),
             task_id: spec.id.clone(),
+            role: spec.role.clone(),
             profile: spec.profile.clone(),
             status: outcome.status,
             usage: outcome.usage,
@@ -1574,6 +1591,10 @@ pub enum WorkflowExecutionError {
         "leaf `{leaf}` profile `{profile}` must be a non-empty token without whitespace, quotes, or `=`"
     )]
     InvalidLeafProfile { leaf: String, profile: String },
+    #[error(
+        "leaf `{leaf}` role `{role}` must be a non-empty token without whitespace, quotes, or `=`"
+    )]
+    InvalidLeafRole { leaf: String, role: String },
     #[error("duplicate workflow node `{node}`")]
     DuplicateNodeId { node: String },
     #[error("workflow node `{node}` has unknown {field} reference `{reference}`")]
@@ -1758,6 +1779,9 @@ fn validate_workflow_nodes_inner(
                         leaf: spec.id.clone(),
                     });
                 }
+                if let Some(role) = spec.role.as_deref() {
+                    validate_leaf_role(&spec.id, role)?;
+                }
                 if let Some(profile) = spec.profile.as_deref() {
                     validate_leaf_profile(&spec.id, profile)?;
                 }
@@ -1829,6 +1853,16 @@ fn validate_leaf_profile(leaf: &str, profile: &str) -> Result<(), WorkflowExecut
         return Err(WorkflowExecutionError::InvalidLeafProfile {
             leaf: leaf.to_string(),
             profile: profile.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_leaf_role(leaf: &str, role: &str) -> Result<(), WorkflowExecutionError> {
+    if validate_role_token(role).is_err() {
+        return Err(WorkflowExecutionError::InvalidLeafRole {
+            leaf: leaf.to_string(),
+            role: role.to_string(),
         });
     }
     Ok(())
@@ -2087,6 +2121,7 @@ mod tests {
             id: id.to_string(),
             prompt: format!("run {id}"),
             agent_type: AgentType::General,
+            role: None,
             profile: None,
             mode: TaskMode::ReadOnly,
             isolation: IsolationMode::Shared,
@@ -2103,6 +2138,7 @@ mod tests {
             id: id.to_string(),
             prompt: format!("run {id}"),
             agent_type: AgentType::General,
+            role: None,
             profile: None,
             mode: TaskMode::ReadOnly,
             isolation: IsolationMode::Shared,
@@ -2119,6 +2155,7 @@ mod tests {
             id: id.to_string(),
             prompt: " ".to_string(),
             agent_type: AgentType::General,
+            role: None,
             profile: None,
             mode: TaskMode::ReadOnly,
             isolation: IsolationMode::Shared,
@@ -2445,6 +2482,7 @@ mod tests {
             id: "ro".to_string(),
             prompt: "inspect".to_string(),
             agent_type: AgentType::Explore,
+            role: None,
             profile: None,
             mode: TaskMode::ReadOnly,
             isolation: IsolationMode::Auto,
@@ -2484,6 +2522,7 @@ mod tests {
             id: "scan-readme".to_string(),
             prompt: "Inspect README setup gaps".to_string(),
             agent_type: AgentType::Explore,
+            role: None,
             profile: Some("scout".to_string()),
             mode: TaskMode::ReadOnly,
             isolation: IsolationMode::Shared,
@@ -2576,6 +2615,7 @@ mod tests {
                             id: "followup-template".to_string(),
                             prompt: "Patch one independent gap".to_string(),
                             agent_type: AgentType::Implementer,
+                            role: None,
                             profile: None,
                             mode: TaskMode::ReadWrite,
                             isolation: IsolationMode::Worktree,
@@ -2803,6 +2843,7 @@ mod tests {
         let result = LeafResult {
             leaf_id: "scan-readme".to_string(),
             task_id: "scan".to_string(),
+            role: None,
             profile: Some("reviewer".to_string()),
             status: WorkflowRunStatus::Failed,
             usage: WorkflowUsage {
@@ -2926,6 +2967,69 @@ mod tests {
             Some("reviewer")
         );
         assert_eq!(execution.leaf_results[1].profile, None);
+    }
+
+    #[test]
+    fn mock_executor_surfaces_leaf_role() {
+        let mut role_leaf = match leaf_node("scout-issue") {
+            WorkflowNode::Leaf(leaf) => leaf,
+            _ => unreachable!("leaf helper returns a leaf"),
+        };
+        role_leaf.role = Some("scout".to_string());
+        let workflow = workflow_spec(vec![WorkflowNode::Leaf(role_leaf)]);
+
+        let execution = MockWorkflowExecutor::new()
+            .run(&workflow)
+            .expect("mock workflow should run");
+
+        assert_eq!(execution.leaf_results[0].role.as_deref(), Some("scout"));
+    }
+
+    #[test]
+    fn leaf_role_token_rule_rejects_invalid_names() {
+        for bad in ["", "has space", "role=scout"] {
+            let mut leaf = match leaf_node("scan") {
+                WorkflowNode::Leaf(leaf) => leaf,
+                _ => unreachable!("leaf helper returns a leaf"),
+            };
+            leaf.role = Some(bad.to_string());
+            let workflow = workflow_spec(vec![WorkflowNode::Leaf(leaf)]);
+
+            let err = MockWorkflowExecutor::new()
+                .run(&workflow)
+                .expect_err("invalid role token should fail validation");
+
+            assert!(
+                matches!(&err, WorkflowExecutionError::InvalidLeafRole { role, .. } if role == bad),
+                "role `{bad}` should be rejected, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leaf_role_roundtrips_without_required_provider_model() {
+        let leaf = LeafSpec {
+            id: "scout-1".to_string(),
+            prompt: "Investigate #4090. Read-only.".to_string(),
+            agent_type: AgentType::Explore,
+            role: Some("scout".to_string()),
+            profile: None,
+            mode: TaskMode::ReadOnly,
+            isolation: IsolationMode::Shared,
+            file_scope: Vec::new(),
+            depends_on_results: Vec::new(),
+            budget: BudgetSpec::default(),
+            permissions: PermissionSpec::default(),
+            model_policy: ModelPolicy::default(),
+        };
+        let json = serde_json::to_string(&leaf).expect("serialize");
+        assert!(json.contains("\"role\":\"scout\""));
+        let parsed: LeafSpec = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed.role.as_deref(), Some("scout"));
+        // Provider/model are optional overrides, not required identity fields.
+        assert_eq!(parsed.model_policy.provider, None);
+        assert_eq!(parsed.model_policy.model, None);
+        assert_eq!(parsed.model_policy, ModelPolicy::default());
     }
 
     #[test]
@@ -3646,6 +3750,7 @@ mod tests {
             leaf_results: vec![LeafResult {
                 leaf_id: "verify-failure".to_string(),
                 task_id: "verify-failure".to_string(),
+                role: None,
                 profile: None,
                 status: WorkflowRunStatus::Failed,
                 usage: WorkflowUsage::default(),

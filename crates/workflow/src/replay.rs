@@ -211,6 +211,7 @@ impl WorkflowReplayExecutor {
             let result = LeafResult {
                 leaf_id: leaf.id.clone(),
                 task_id: leaf.id.clone(),
+                role: leaf.role.clone(),
                 profile: leaf.profile.clone(),
                 status: WorkflowRunStatus::ReplayDiverged,
                 usage: WorkflowUsage::default(),
@@ -526,6 +527,7 @@ mod tests {
             id: id.to_string(),
             prompt: format!("run {id}"),
             agent_type: AgentType::General,
+            role: None,
             profile: None,
             mode: TaskMode::ReadOnly,
             isolation: crate::IsolationMode::Shared,
@@ -558,6 +560,7 @@ mod tests {
         LeafResult {
             leaf_id: id.to_string(),
             task_id: id.to_string(),
+            role: None,
             profile: None,
             status: WorkflowRunStatus::Succeeded,
             usage: WorkflowUsage {

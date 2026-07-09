@@ -57,12 +57,16 @@ fn compile_js_like_workflow(
     Ok(workflow)
 }
 
-// Profile names are case-insensitive roster keys; the IR stores the canonical
-// lowercase form. Invalid tokens are left as-is so validation reports them.
+// Role/profile names are case-insensitive roster keys; the IR stores the
+// canonical lowercase form. Invalid tokens are left as-is so validation
+// reports them.
 fn normalize_leaf_profiles(nodes: &mut [WorkflowNode]) {
     for node in nodes {
         match node {
             WorkflowNode::Leaf(spec) => {
+                if let Some(role) = spec.role.as_mut() {
+                    *role = role.trim().to_lowercase();
+                }
                 if let Some(profile) = spec.profile.as_mut() {
                     *profile = profile.trim().to_lowercase();
                 }
@@ -536,6 +540,36 @@ workflow({
             panic!("second node should be a leaf");
         };
         assert_eq!(scan.profile, None);
+    }
+
+    #[test]
+    fn javascript_workflow_accepts_and_normalizes_agent_role() {
+        let source = r#"
+workflow({
+  "goal": "role routing",
+  "nodes": [
+    { "agent": { "id": "scout-issue", "prompt": "Investigate #4090. Read-only.", "role": " Scout " } },
+    { "agent": { "id": "fix-it", "prompt": "Apply minimal fix.", "role": "implementer" } }
+  ]
+});
+"#;
+
+        let workflow = compile_javascript_workflow("role.workflow.js", source)
+            .expect("role-carrying workflow should compile");
+
+        let WorkflowNode::Leaf(scout) = &workflow.nodes[0] else {
+            panic!("first node should be a leaf");
+        };
+        assert_eq!(scout.role.as_deref(), Some("scout"));
+        assert_eq!(scout.profile, None);
+        // Provider/model are not required identity fields on role steps.
+        assert_eq!(scout.model_policy.provider, None);
+        assert_eq!(scout.model_policy.model, None);
+
+        let WorkflowNode::Leaf(fix) = &workflow.nodes[1] else {
+            panic!("second node should be a leaf");
+        };
+        assert_eq!(fix.role.as_deref(), Some("implementer"));
     }
 
     #[test]

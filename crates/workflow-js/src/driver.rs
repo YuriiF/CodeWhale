@@ -25,19 +25,24 @@ use crate::error::DriverError;
 
 /// One `task()` invocation, fully resolved and validated on the VM side.
 ///
-/// Field semantics mirror the `agent` tool's spawn options; `profile` is the
-/// Fleet roster profile token, already trimmed + lowercased and checked
-/// against the same token rule as `crates/workflow`'s leaf profiles. Roster
-/// membership is resolved by the driver (tui) at spawn time — this crate
-/// never sees the saved Fleet roster.
+/// Field semantics mirror the `agent` tool's spawn options.
+///
+/// Step identity is fleet `role` (preferred) and/or `profile` (#4177). Both
+/// tokens are normalized (trimmed + lowercased) with the same rule as
+/// `crates/workflow` leaf profiles. Roster membership is resolved by the
+/// driver (tui) at spawn time — this crate never sees the saved Fleet roster.
+/// Provider/model remain optional overrides, not required identity fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskRequest {
     /// The child prompt (JS `description` or `prompt`; required).
     pub description: String,
-    /// Subagent role (JS `subagentType` or `type`); `None` lets the driver
+    /// Subagent type (JS `subagentType` or `type`); `None` lets the driver
     /// apply its default (`general`).
     pub subagent_type: Option<String>,
+    /// Fleet role name (JS `role`), e.g. `scout` / `implementer` (#4177).
+    pub role: Option<String>,
     /// Fleet profile token, normalized (trimmed, lowercased) and validated.
+    /// Explicit profile wins over role mapping at spawn time.
     pub profile: Option<String>,
     /// Explicit model override; always wins over `model_strength`.
     pub model: Option<String>,

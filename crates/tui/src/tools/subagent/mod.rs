@@ -1104,6 +1104,10 @@ pub(crate) struct WorkflowTaskSpawnMetadata {
     pub resolved_provider: String,
     pub resolved_model: String,
     pub route_source: String,
+    /// Fleet role resolved for this spawn, if any (#4177).
+    pub resolved_role: Option<String>,
+    /// AgentProfile id resolved for this spawn, if any (#4177).
+    pub resolved_profile: Option<String>,
     pub parent_task_id: Option<String>,
     pub depth: u32,
     /// Workflow run that launched this child (`None` for direct `agent` spawns).
@@ -4426,10 +4430,21 @@ async fn spawn_subagent_from_input(
     child_runtime.reasoning_effort = route.reasoning_effort.clone();
     child_runtime.reasoning_effort_auto = false;
     let model_route = route.model_route;
+    let resolved_role = profile_member
+        .as_ref()
+        .map(|member| member.profile.role.name.clone())
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| spawn_request.assignment.role.clone());
+    let resolved_profile = profile_member
+        .as_ref()
+        .map(|member| member.id.clone())
+        .or_else(|| spawn_request.profile.clone());
     let spawn_metadata = WorkflowTaskSpawnMetadata {
         resolved_provider: child_runtime.client.api_provider().as_str().to_string(),
         resolved_model: effective_model.clone(),
         route_source: route_source_label(&model_route),
+        resolved_role,
+        resolved_profile,
         parent_task_id: child_runtime.parent_agent_id.clone(),
         depth: child_runtime.spawn_depth,
         workflow_run_id: None,
@@ -4527,6 +4542,9 @@ pub(crate) async fn spawn_workflow_task(
     });
     if let Some(value) = request.subagent_type {
         input["type"] = json!(value);
+    }
+    if let Some(value) = request.role {
+        input["role"] = json!(value);
     }
     if let Some(value) = request.profile {
         input["profile"] = json!(value);
@@ -6329,15 +6347,10 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         })
         .transpose()?;
 
-    let parsed_role_type = role_input
-        .map(|role| {
-            SubAgentType::from_str(role).ok_or_else(|| {
-                ToolError::invalid_input(format!(
-                    "Invalid role alias '{role}'. Use: {VALID_ROLE_ALIASES}"
-                ))
-            })
-        })
-        .transpose()?;
+    // Role may be either a SubAgentType alias (reviewer → Review) or a fleet
+    // roster role / member id (scout, release_lead). Type aliases still set
+    // agent_type; non-alias roles defer to fleet profile resolution (#4177).
+    let parsed_role_type = role_input.and_then(SubAgentType::from_str);
 
     if let (Some(type_kind), Some(role_kind)) = (&parsed_type, &parsed_role_type)
         && type_kind != role_kind
@@ -6352,22 +6365,35 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         .or(parsed_role_type)
         .unwrap_or(SubAgentType::General);
 
-    if let Some(role) = role_input
-        && normalize_role_alias(role).is_none()
-    {
-        return Err(ToolError::invalid_input(format!(
-            "Invalid role alias '{role}'. Use: {VALID_ROLE_ALIASES}"
-        )));
-    }
-
-    let role = role_input
+    let role_alias = role_input
         .and_then(normalize_role_alias)
         .or_else(|| type_input.and_then(normalize_role_alias))
         .map(str::to_string);
 
-    let profile = optional_input_str(input, &["profile", "fleet_profile", "roster_profile"])
+    // Fleet role token: either the raw role when it is not a type alias, or
+    // the alias form (e.g. implementer) used as a roster lookup key.
+    let fleet_role_token = match role_input {
+        Some(raw) => {
+            let token = validate_profile_name(raw)?;
+            Some(token)
+        }
+        None => None,
+    };
+
+    let role = role_alias.or_else(|| fleet_role_token.clone()).or_else(|| {
+        type_input
+            .and_then(normalize_role_alias)
+            .map(str::to_string)
+    });
+
+    let mut profile = optional_input_str(input, &["profile", "fleet_profile", "roster_profile"])
         .map(validate_profile_name)
         .transpose()?;
+    // When the caller only declared a fleet role, use it as the profile key
+    // so `apply_spawn_profile` is the single roster resolution path (#4177).
+    if profile.is_none() {
+        profile = fleet_role_token.clone();
+    }
 
     let allowed_tools = input
         .get("allowed_tools")
@@ -6534,7 +6560,7 @@ fn apply_spawn_profile(
     let Some(profile_id) = request.profile.as_deref() else {
         return Ok(None);
     };
-    let Some(member) = roster.get(profile_id) else {
+    let Some(member) = resolve_roster_member(roster, profile_id) else {
         let available = roster
             .members()
             .iter()
@@ -6542,7 +6568,8 @@ fn apply_spawn_profile(
             .collect::<Vec<_>>()
             .join(", ");
         return Err(ToolError::invalid_input(format!(
-            "Unknown profile '{profile_id}'. Available fleet roster members: {available}. See /fleet."
+            "Unknown fleet role/profile '{profile_id}'. Available fleet roster members: {available}. \
+             Type aliases: {VALID_ROLE_ALIASES}. See /fleet."
         )));
     };
 
@@ -6556,6 +6583,8 @@ fn apply_spawn_profile(
         )));
     }
     request.agent_type = member_type;
+    // Record the canonical profile id after role→profile resolution.
+    request.profile = Some(member.id.clone());
 
     // Surface the member's role in prompts and ledger records.
     let role_name = member.profile.role.name.trim();
@@ -6570,6 +6599,39 @@ fn apply_spawn_profile(
     }
 
     Ok(Some(member.clone()))
+}
+
+/// Resolve a fleet role or profile token against the roster (#4177).
+///
+/// Lookup order:
+/// 1. Member id (case-insensitive)
+/// 2. Member role name
+/// 3. Common stopship aliases (`implementer` → `builder`, `release_lead` → `manager`)
+fn resolve_roster_member<'a>(
+    roster: &'a crate::fleet::roster::FleetRoster,
+    id_or_role: &str,
+) -> Option<&'a crate::fleet::profile::AgentProfile> {
+    let key = id_or_role.trim();
+    if key.is_empty() {
+        return None;
+    }
+    if let Some(member) = roster.get(key) {
+        return Some(member);
+    }
+    if let Some(member) = roster
+        .members()
+        .iter()
+        .find(|member| member.profile.role.name.trim().eq_ignore_ascii_case(key))
+    {
+        return Some(member);
+    }
+    let alias = match key.to_ascii_lowercase().as_str() {
+        "implementer" | "implement" | "implementation" => Some("builder"),
+        "release_lead" | "release-lead" | "releaselead" => Some("manager"),
+        "scout" | "explore" | "explorer" | "exploration" => Some("scout"),
+        _ => None,
+    };
+    alias.and_then(|id| roster.get(id))
 }
 
 /// Compact profile block appended to the child prompt, mirroring the fleet

@@ -593,6 +593,8 @@ struct TaskOptions {
     description: Option<String>,
     #[serde(alias = "type")]
     subagent_type: Option<String>,
+    /// Fleet role name (#4177). Preferred step identity field.
+    role: Option<String>,
     profile: Option<String>,
     model: Option<String>,
     model_strength: Option<String>,
@@ -614,6 +616,12 @@ fn parse_task_options(opts_json: &str) -> Result<TaskRequest, String> {
         .description
         .filter(|description| !description.trim().is_empty())
         .ok_or_else(|| "task(): 'description' (or 'prompt') is required".to_string())?;
+    let role = options
+        .role
+        .as_deref()
+        .map(normalize_profile)
+        .transpose()
+        .map_err(|err| format!("task(): role: {err}"))?;
     let profile = options
         .profile
         .as_deref()
@@ -623,6 +631,7 @@ fn parse_task_options(opts_json: &str) -> Result<TaskRequest, String> {
     Ok(TaskRequest {
         description,
         subagent_type: options.subagent_type,
+        role,
         profile,
         model: options.model,
         model_strength: options.model_strength,
