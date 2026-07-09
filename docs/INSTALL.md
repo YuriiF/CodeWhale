@@ -158,7 +158,7 @@ test -x "$PREFIX/bin/codewhale-tui"
 codewhale --version
 codewhale doctor
 codewhale exec --auto "run pwd"
-codewhale-tui --no-alt-screen
+codewhale-tui --version
 ```
 
 Known limitations:
@@ -169,9 +169,10 @@ Known limitations:
 - OS keyring behavior is best-effort. If Termux cannot provide a usable secret
   store, use `codewhale auth status` to confirm the actual source and fall back
   to provider env vars or config-backed auth.
-- Terminal rendering varies by Android terminal app. Use
-  `codewhale-tui --no-alt-screen` in smoke tests before trying the full-screen
-  TUI.
+- Terminal rendering varies by Android terminal app. The TUI always owns the
+  alternate screen; `--no-alt-screen` is accepted only as a deprecated
+  compatibility no-op. If a terminal app cannot render the full-screen TUI,
+  use `codewhale exec` for headless runs instead.
 
 ---
 

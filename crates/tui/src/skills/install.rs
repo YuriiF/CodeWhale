@@ -51,8 +51,9 @@ use thiserror::Error;
 use crate::network_policy::{Decision, NetworkPolicy, host_from_url};
 
 fn reqwest_client() -> reqwest::Client {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::new()
+    codewhale_release::platform_http_client_builder()
+        .build()
+        .expect("build platform HTTP client")
 }
 
 /// Cache directory for registry-synced skills.

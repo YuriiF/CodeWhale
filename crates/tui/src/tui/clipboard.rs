@@ -70,7 +70,10 @@ impl PastedImage {
 }
 
 /// Clipboard payloads supported by the TUI.
-#[cfg_attr(all(target_env = "ohos", not(test)), allow(dead_code))]
+#[cfg_attr(
+    all(any(target_env = "ohos", target_os = "android"), not(test)),
+    allow(dead_code)
+)]
 pub enum ClipboardContent {
     Text(String),
     Image(PastedImage),

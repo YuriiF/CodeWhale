@@ -44,6 +44,50 @@ pub const UPDATE_USER_AGENT: &str = "codewhale-updater";
 const CNB_RELEASE_ASSET_BASE: &str = "https://cnb.cool/Hmbown/CodeWhale/-/releases";
 const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Build a reqwest client builder with the TLS roots appropriate for the
+/// current platform.
+///
+/// Android command-line programs such as Termux do not run inside a Java
+/// application and therefore cannot initialize reqwest's Android platform
+/// verifier with a `JavaVM` and `Context`. Use the Mozilla WebPKI roots there
+/// so native CLI/TUI HTTPS works without a JNI host. Other platforms keep
+/// reqwest's platform verifier.
+pub fn platform_http_client_builder() -> reqwest::ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let builder = reqwest::Client::builder();
+    #[cfg(target_os = "android")]
+    {
+        builder.tls_backend_preconfigured(android_rustls_config())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        builder
+    }
+}
+
+/// Blocking counterpart of [`platform_http_client_builder`].
+pub fn platform_blocking_http_client_builder() -> reqwest::blocking::ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let builder = reqwest::blocking::Client::builder();
+    #[cfg(target_os = "android")]
+    {
+        builder.tls_backend_preconfigured(android_rustls_config())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        builder
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_rustls_config() -> rustls::ClientConfig {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
+
 /// The release channel to query for updates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseChannel {
@@ -161,7 +205,7 @@ pub fn update_network_fallback_hint() -> String {
 ///
 /// `description` is included in error messages to identify the request purpose.
 pub fn fetch_release_json_blocking(url: &str, description: &str) -> Result<String> {
-    let client = reqwest::blocking::Client::builder()
+    let client = platform_blocking_http_client_builder()
         .user_agent(UPDATE_USER_AGENT)
         .timeout(RELEASE_METADATA_TIMEOUT)
         .build()
@@ -180,7 +224,7 @@ pub fn fetch_release_json_blocking(url: &str, description: &str) -> Result<Strin
 
 /// Async counterpart of [`fetch_release_json_blocking`].
 pub async fn fetch_release_json_async(url: &str, description: &str) -> Result<String> {
-    let client = reqwest::Client::builder()
+    let client = platform_http_client_builder()
         .user_agent(UPDATE_USER_AGENT)
         .timeout(RELEASE_METADATA_TIMEOUT)
         .build()

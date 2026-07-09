@@ -242,7 +242,7 @@ pub(crate) async fn chat_completions_handler(
     }
 
     // Build upstream request.
-    let upstream_req = reqwest::Client::builder()
+    let upstream_req = codewhale_release::platform_http_client_builder()
         .build()
         .map_err(|e| {
             (

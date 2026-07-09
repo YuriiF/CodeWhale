@@ -802,7 +802,7 @@ impl RuntimeBridge {
             .context("failed to start runtime API bridge")?;
         let mut bridge = Self {
             base_url: format!("http://127.0.0.1:{port}"),
-            client: reqwest::Client::builder()
+            client: codewhale_release::platform_http_client_builder()
                 .build()
                 .context("failed to build runtime API client")?,
             auth_token: Some(auth_token),
@@ -1089,7 +1089,7 @@ impl RuntimeBridge {
         install_rustls_crypto_provider();
         Self {
             base_url,
-            client: reqwest::Client::builder()
+            client: codewhale_release::platform_http_client_builder()
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("build reqwest test client"),

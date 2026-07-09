@@ -5,15 +5,17 @@ pub(crate) fn ensure_rustls_crypto_provider() {
 #[allow(dead_code)]
 pub(crate) fn reqwest_client() -> reqwest::Client {
     ensure_rustls_crypto_provider();
-    reqwest::Client::new()
+    reqwest_client_builder()
+        .build()
+        .expect("build platform HTTP client")
 }
 
 pub(crate) fn reqwest_client_builder() -> reqwest::ClientBuilder {
     ensure_rustls_crypto_provider();
-    reqwest::Client::builder()
+    codewhale_release::platform_http_client_builder()
 }
 
 pub(crate) fn reqwest_blocking_client_builder() -> reqwest::blocking::ClientBuilder {
     ensure_rustls_crypto_provider();
-    reqwest::blocking::Client::builder()
+    codewhale_release::platform_blocking_http_client_builder()
 }

@@ -190,10 +190,14 @@ impl WebhookHookSink {
     pub fn new(url: String) -> Self {
         Self {
             url,
-            client: reqwest::Client::builder()
+            client: codewhale_release::platform_http_client_builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+                .unwrap_or_else(|_| {
+                    codewhale_release::platform_http_client_builder()
+                        .build()
+                        .expect("build fallback HTTP client")
+                }),
         }
     }
 }

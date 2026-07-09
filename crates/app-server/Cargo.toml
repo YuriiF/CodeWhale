@@ -19,6 +19,7 @@ codewhale-execpolicy = { path = "../execpolicy", version = "0.8.67" }
 codewhale-hooks = { path = "../hooks", version = "0.8.67" }
 codewhale-mcp = { path = "../mcp", version = "0.8.67" }
 codewhale-protocol = { path = "../protocol", version = "0.8.67" }
+codewhale-release = { path = "../release", version = "0.8.67" }
 codewhale-state = { path = "../state", version = "0.8.67" }
 codewhale-tools = { path = "../tools", version = "0.8.67" }
 serde.workspace = true

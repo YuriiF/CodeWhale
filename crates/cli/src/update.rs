@@ -470,9 +470,7 @@ pub(crate) fn validate_and_build_proxy(proxy_str: &str) -> Result<Proxy> {
 }
 
 fn update_http_client(proxy: Option<&Proxy>) -> Result<reqwest::blocking::Client> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let mut builder = reqwest::blocking::Client::builder();
+    let mut builder = codewhale_release::platform_blocking_http_client_builder();
     if let Some(proxy) = proxy {
         builder = builder.proxy(proxy.clone());
     }

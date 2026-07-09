@@ -13,7 +13,7 @@ use tracing::debug;
 /// Reusable static client — avoids creating a new connection pool per request.
 fn suggestion_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    CLIENT.get_or_init(crate::tls::reqwest_client)
 }
 
 /// Generate a follow-up prompt suggestion based on recent messages.

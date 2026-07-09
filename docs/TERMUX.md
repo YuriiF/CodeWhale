@@ -54,11 +54,14 @@ identically on Android — the absence of an OS sandbox does not weaken it.
 ### Secret storage: file-backed
 
 Android has no OS keyring (no Secret Service / dbus). CodeWhale falls back
-to **file-backed secret storage**: encrypted-at-rest JSON files under
-`~/.codewhale/secrets/` (Termux home directory), with `0600` permissions.
+to **file-backed secret storage**: plaintext JSON files under
+`~/.codewhale/secrets/` (Termux home directory), protected only by `0600`
+file permissions — they are **not encrypted at rest**. On single-user
+Termux this is the same protection level as `~/.ssh` private keys.
 
-- API keys set via `codewhale setup` or `/provider` are stored in these
-  files, never in plaintext beyond the file the user chose.
+- API keys set via `codewhale setup` or `/provider` land in these
+  permission-protected files; `codewhale auth set` additionally writes the
+  configured key into `config.toml`, so treat both files as sensitive.
 - `codewhale doctor` reports which secret backend is active.
 
 ### Self-update
