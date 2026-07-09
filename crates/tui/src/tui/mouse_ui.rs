@@ -236,13 +236,14 @@ fn handle_workflow_panel_mouse(app: &mut App, mouse: MouseEvent) -> bool {
         .as_ref()
         .is_some_and(|panel| panel.lifecycle.is_running());
 
-    if in_cancel_zone && running {
-        if let Some(run_id) = app.request_workflow_panel_cancel() {
-            app.status_message = Some(format!(
-                "Cancelling workflow {run_id}… (dispatch via /workflow cancel {run_id})"
-            ));
-            return true;
-        }
+    if in_cancel_zone
+        && running
+        && let Some(run_id) = app.request_workflow_panel_cancel()
+    {
+        app.status_message = Some(format!(
+            "Cancelling workflow {run_id}… (dispatch via /workflow cancel {run_id})"
+        ));
+        return true;
     }
 
     // Any other click on the panel toggles expand/collapse.

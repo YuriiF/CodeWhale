@@ -586,16 +586,16 @@ async fn start_workflow(
         state.record_snapshot(&record);
         // #4122: emit RunStarted immediately so the panel + history card open
         // before the first task/phase (including wait:false fire-and-forget).
-        if let Some(tx) = runtime.event_tx.as_ref() {
-            if let Ok(mut value) = serde_json::to_value(&started) {
-                if let Some(obj) = value.as_object_mut() {
-                    obj.insert("run_id".to_string(), json!(run_id));
-                }
-                let _ = tx.try_send(Event::WorkflowUi {
-                    run_id: run_id.clone(),
-                    event: value,
-                });
+        if let Some(tx) = runtime.event_tx.as_ref()
+            && let Ok(mut value) = serde_json::to_value(&started)
+        {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("run_id".to_string(), json!(run_id));
             }
+            let _ = tx.try_send(Event::WorkflowUi {
+                run_id: run_id.clone(),
+                event: value,
+            });
         }
     }
 
@@ -1796,6 +1796,7 @@ struct SubAgentWorkflowDriver {
 }
 
 impl SubAgentWorkflowDriver {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         run_id: String,
         manager: SharedSubAgentManager,

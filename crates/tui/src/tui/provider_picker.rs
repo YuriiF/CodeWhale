@@ -1238,19 +1238,17 @@ impl ProviderPickerView {
         if memory.catalog_view {
             self.view = ProviderListView::Catalog;
         }
-        if let Some(remembered_id) = memory.selected_provider_id.as_deref() {
-            if let Some(idx) = self
+        if let Some(remembered_id) = memory.selected_provider_id.as_deref()
+            && let Some(idx) = self
                 .rows
                 .iter()
                 .position(|row| row.provider_id == remembered_id)
-            {
-                if self.row_visible(idx) || memory.catalog_view {
-                    if memory.catalog_view {
-                        self.view = ProviderListView::Catalog;
-                    }
-                    self.selected_idx = idx;
-                }
+            && (self.row_visible(idx) || memory.catalog_view)
+        {
+            if memory.catalog_view {
+                self.view = ProviderListView::Catalog;
             }
+            self.selected_idx = idx;
         }
         if !self.rows.is_empty() && !self.row_visible(self.selected_idx) {
             self.selected_idx = (0..self.rows.len())

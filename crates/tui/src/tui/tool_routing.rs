@@ -1007,7 +1007,7 @@ fn sync_workflow_history_card_from_panel(app: &mut App) {
                     value
                         .get("events")
                         .and_then(|e| e.as_array())
-                        .map_or(true, |e| e.is_empty())
+                        .is_none_or(|e| e.is_empty())
                 }
             }
         };
