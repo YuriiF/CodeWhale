@@ -79,7 +79,7 @@ ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 lru = "0.18"
 parking_lot = "0.12"
-pdf-extract = { version = "0.10", optional = true }
+pdf-extract = { version = "0.12", optional = true }
 tar = "0.4"
 flate2 = "1.1"
 sha2.workspace = true
