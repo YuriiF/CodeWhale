@@ -1613,12 +1613,11 @@ fn validate_leaf_runtime_contract(spec: &LeafSpec) -> Result<(), ToolError> {
             spec.id
         )));
     }
-    if spec.mode == TaskMode::ReadOnly && matches!(spec.agent_type, AgentType::Implementer) {
-        return Err(ToolError::invalid_input(format!(
-            "Workflow leaf '{}' is read_only but uses implementer agent_type",
-            spec.id
-        )));
-    }
+    // A Fleet role and its authority posture are independent. In particular,
+    // acceptance workflows must be able to resolve the `implementer` role to
+    // its saved profile while narrowing that child to the read-only tool set.
+    // `leaf_allowed_tools` enforces the mode below; rejecting the combination
+    // made verification-only role/gate dogfood impossible.
     if spec.mode == TaskMode::ReadWrite
         && matches!(
             spec.agent_type,
@@ -1667,7 +1666,11 @@ fn result_inputs_expression(inputs: &[String]) -> String {
 }
 
 fn leaf_subagent_type(spec: &LeafSpec) -> Result<&'static str, ToolError> {
-    if spec.mode == TaskMode::ReadOnly && spec.agent_type == AgentType::General {
+    if spec.mode == TaskMode::ReadOnly
+        && spec.agent_type == AgentType::General
+        && spec.role.is_none()
+        && spec.profile.is_none()
+    {
         return Ok("review");
     }
     Ok(agent_type_name(spec.agent_type))
@@ -4410,6 +4413,97 @@ reviewer = "reviewer"
                 .unwrap()
                 .iter()
                 .any(|message| message == "phase: parallel-audit")
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn stopship_acceptance_fixture_emits_role_gate_and_terminal_receipts() {
+        let _retry_guard = workflow_test_retry_guard();
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let workflow_dir = tmp.path().join("workflows");
+        let fleet_dir = tmp.path().join("fleets");
+        std::fs::create_dir_all(&workflow_dir).expect("workflow dir");
+        std::fs::create_dir_all(&fleet_dir).expect("fleet dir");
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        std::fs::copy(
+            repo_root.join("workflows/v0868_stopship_lane.workflow.js"),
+            workflow_dir.join("v0868_stopship_lane.workflow.js"),
+        )
+        .expect("copy stopship acceptance fixture");
+        std::fs::copy(
+            repo_root.join("fleets/v0868-stopship.toml"),
+            fleet_dir.join("v0868-stopship.toml"),
+        )
+        .expect("copy stopship fleet");
+
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 8);
+        let (client, calls) = fake_chat_client("acceptance evidence").await;
+        let runtime = SubAgentRuntime::new(
+            client,
+            "deepseek-v4-flash".to_string(),
+            ctx.clone(),
+            true,
+            None,
+            manager,
+        );
+        let tool = WorkflowTool::new(runtime.manager.clone(), runtime);
+
+        let result = tool
+            .execute(
+                json!({
+                    "action": "run",
+                    "source_path": "workflows/v0868_stopship_lane.workflow.js",
+                    "fleet": "v0868-stopship"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("stopship acceptance workflow returns a terminal record");
+        let payload: Value = serde_json::from_str(&result.content).expect("workflow JSON");
+
+        assert_eq!(payload["status"], "completed", "{payload}");
+        assert_eq!(payload["execution"]["status"], "succeeded", "{payload}");
+        assert_eq!(calls.load(Ordering::SeqCst), 5, "one child per Fleet role");
+
+        let events = payload["events"].as_array().expect("typed events");
+        let started = events
+            .iter()
+            .filter(|event| event["type"] == "task_started")
+            .collect::<Vec<_>>();
+        let expected_roles = [
+            ("scout", "scout"),
+            ("implementer", "builder"),
+            ("reviewer", "reviewer"),
+            ("verifier", "verifier"),
+            ("release_lead", "manager"),
+        ];
+        assert_eq!(started.len(), expected_roles.len(), "{started:#?}");
+        for (event, (role, profile)) in started.iter().zip(expected_roles) {
+            assert_eq!(event["role"], role);
+            assert_eq!(event["profile"], profile);
+            assert_eq!(event["resolved_profile"], profile);
+            assert_eq!(event["workflow_run_id"], payload["run_id"]);
+        }
+
+        let gates = events
+            .iter()
+            .filter(|event| event["type"] == "gate_updated")
+            .collect::<Vec<_>>();
+        assert_eq!(gates.len(), 4, "{gates:#?}");
+        assert!(gates.iter().all(|event| event["state"] == "passed"));
+        assert_eq!(gates[0]["role"], "scout");
+        assert_eq!(gates[0]["blocked_role"], "implementer");
+        assert_eq!(gates[3]["role"], "verifier");
+        assert_eq!(gates[3]["blocked_role"], "release_lead");
+        assert!(
+            events.iter().any(|event| {
+                event["type"] == "run_completed" && event["status"] == "completed"
+            }),
+            "{events:#?}"
         );
     }
 

@@ -451,7 +451,10 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentType, GateKind, GateOn, GateOnFail, WorkflowReplayExecutor};
+    use crate::{
+        AgentType, GateKind, GateOn, GateOnFail, GateOutcome, GateState, LaneGateBoard, TaskMode,
+        WorkflowReplayExecutor,
+    };
 
     #[test]
     fn javascript_workflow_compiles_branch_reduce_to_ir() {
@@ -620,6 +623,78 @@ workflow({
         assert_eq!(gate.on_fail, GateOnFail::Block);
         assert_eq!(gate.blocks_role.as_deref(), Some("implementer"));
         assert_eq!(gate.artifact_kind.as_deref(), Some("findings"));
+    }
+
+    #[test]
+    fn stopship_acceptance_fixture_is_read_only_and_gate_complete() {
+        let source = include_str!("../../../workflows/v0868_stopship_lane.workflow.js");
+        let workflow = compile_javascript_workflow("v0868_stopship_lane.workflow.js", source)
+            .expect("compile stopship acceptance fixture");
+
+        assert_eq!(workflow.id.as_deref(), Some("v0868-stopship-lane"));
+        let WorkflowNode::Sequence(sequence) = &workflow.nodes[0] else {
+            panic!("acceptance fixture should begin with one ordered role chain");
+        };
+        let expected_roles = [
+            "scout",
+            "implementer",
+            "reviewer",
+            "verifier",
+            "release_lead",
+        ];
+        assert_eq!(sequence.children.len(), expected_roles.len());
+        for (node, expected_role) in sequence.children.iter().zip(expected_roles) {
+            let WorkflowNode::Leaf(leaf) = node else {
+                panic!("acceptance role chain must contain only agent leaves");
+            };
+            assert_eq!(leaf.role.as_deref(), Some(expected_role));
+            assert_eq!(leaf.mode, TaskMode::ReadOnly);
+            assert!(!leaf.permissions.allow_write);
+            assert!(leaf.permissions.allowed_tools.is_empty());
+            assert!(
+                leaf.profile.is_none(),
+                "Fleet must resolve the declared role"
+            );
+        }
+
+        let expected_gates = [
+            ("scout", "implementer"),
+            ("implementer", "reviewer"),
+            ("reviewer", "verifier"),
+            ("verifier", "release_lead"),
+        ];
+        assert_eq!(workflow.gates.len(), expected_gates.len());
+        for (gate, (role, blocked_role)) in workflow.gates.iter().zip(expected_gates) {
+            assert_eq!(gate.role, role);
+            assert_eq!(gate.on, GateOn::RoleComplete);
+            assert_eq!(gate.on_fail, GateOnFail::Block);
+            assert_eq!(gate.blocks_role.as_deref(), Some(blocked_role));
+            assert_eq!(gate.max_retries, 0);
+            assert!(gate.artifact_kind.is_some());
+        }
+
+        let mut board = LaneGateBoard::new("lane-fixture-contract");
+        board.install_gates(&workflow.gates);
+        assert_eq!(
+            board
+                .evaluate(&workflow.gates[0], GateOutcome::Pass)
+                .expect("successful role promotes its gate"),
+            GateState::Passed
+        );
+        let failure = board
+            .evaluate(
+                &workflow.gates[3],
+                GateOutcome::Fail {
+                    reason: "verifier receipt missing".to_string(),
+                },
+            )
+            .expect("failed verifier updates its gate");
+        assert!(matches!(failure, GateState::Blocked { .. }));
+        assert!(
+            board
+                .role_is_blocked(&workflow.gates, "release_lead")
+                .is_some()
+        );
     }
 
     #[test]
