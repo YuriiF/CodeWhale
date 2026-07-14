@@ -1983,6 +1983,11 @@ pub struct Config {
     /// from a user override during an in-session provider switch.
     #[serde(skip)]
     pub(crate) reasoning_effort_inferred_from_legacy_alias: bool,
+    /// Original first-party DeepSeek alias captured before model normalization.
+    /// This runtime-only receipt lets diagnostics explain why the resolved
+    /// model changed without persisting compatibility state back to config.
+    #[serde(skip)]
+    pub(crate) migrated_deepseek_model_alias: Option<String>,
     /// Native tool catalog controls. This table controls built-in
     /// tool loading policy.
     #[serde(default)]
@@ -3724,6 +3729,45 @@ impl Config {
         }
         headers.retain(|name, value| !name.trim().is_empty() && !value.trim().is_empty());
         headers
+    }
+
+    fn active_configured_model_id(&self) -> Option<&str> {
+        self.provider_config_for(self.api_provider())
+            .and_then(|entry| entry.model.as_deref())
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .or_else(|| {
+                self.default_text_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+            })
+    }
+
+    /// Describe a first-party DeepSeek alias that was migrated for the active
+    /// route. Custom endpoints retain ownership of the same model strings and
+    /// must not receive DeepSeek's deprecation claim.
+    pub(crate) fn active_deepseek_alias_deprecation(&self) -> Option<ModelAliasDeprecation> {
+        let provider = self.api_provider();
+        if !matches!(
+            provider,
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
+        ) {
+            return None;
+        }
+
+        let alias = self
+            .migrated_deepseek_model_alias
+            .as_deref()
+            .or_else(|| self.active_configured_model_id())?
+            .trim()
+            .to_ascii_lowercase();
+        let base_url = self.deepseek_base_url();
+        if wire_model_for_provider_route(provider, &base_url, &alias) == alias {
+            return None;
+        }
+
+        deepseek_alias_deprecation(&alias)
     }
 
     #[must_use]
@@ -5770,27 +5814,35 @@ fn apply_env_overrides(config: &mut Config) {
 }
 
 fn normalize_model_config(config: &mut Config) {
+    let provider = config.api_provider();
+    let base_url = config.deepseek_base_url();
+    config.migrated_deepseek_model_alias = if matches!(
+        provider,
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
+    ) {
+        config
+            .active_configured_model_id()
+            .map(str::to_ascii_lowercase)
+            .filter(|model| deepseek_alias_deprecation(model).is_some())
+            .filter(|model| {
+                wire_model_for_provider_route(provider, &base_url, model) != model.as_str()
+            })
+    } else {
+        None
+    };
+
     // Preserve the behavioral half of DeepSeek's retired aliases while
     // migrating their model id to V4 Flash. An explicit reasoning setting is
     // authoritative; this compatibility default only fills an omitted value.
     // Custom endpoints retain both their model id and their own semantics.
     if config.reasoning_effort.is_none() {
-        let provider = config.api_provider();
-        let base_url = config.deepseek_base_url();
-        if matches!(
-            provider,
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
-        ) && !base_url_is_custom_for_provider(provider, &base_url)
-        {
-            let alias_effort = config
-                .provider_config_for(provider)
-                .and_then(|entry| entry.model.as_deref())
-                .or(config.default_text_model.as_deref())
-                .and_then(legacy_deepseek_alias_reasoning_effort);
-            if let Some(effort) = alias_effort {
-                config.reasoning_effort = Some(effort.to_string());
-                config.reasoning_effort_inferred_from_legacy_alias = true;
-            }
+        let alias_effort = config
+            .migrated_deepseek_model_alias
+            .as_deref()
+            .and_then(legacy_deepseek_alias_reasoning_effort);
+        if let Some(effort) = alias_effort {
+            config.reasoning_effort = Some(effort.to_string());
+            config.reasoning_effort_inferred_from_legacy_alias = true;
         }
     }
 
@@ -6312,6 +6364,9 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         reasoning_effort_inferred_from_legacy_alias: override_cfg
             .reasoning_effort_inferred_from_legacy_alias
             || base.reasoning_effort_inferred_from_legacy_alias,
+        migrated_deepseek_model_alias: override_cfg
+            .migrated_deepseek_model_alias
+            .or(base.migrated_deepseek_model_alias),
         tools: override_cfg.tools.or(base.tools),
         skills_dir: override_cfg.skills_dir.or(base.skills_dir),
         mcp_config_path: override_cfg.mcp_config_path.or(base.mcp_config_path),

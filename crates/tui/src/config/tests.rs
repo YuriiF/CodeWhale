@@ -3533,6 +3533,20 @@ fn normalize_model_name_for_provider_canonicalizes_deepseek_api_variants() {
 }
 
 #[test]
+fn migrated_deepseek_alias_receipt_is_runtime_only_and_defaults_empty() {
+    assert!(Config::default().migrated_deepseek_model_alias.is_none());
+
+    let config: Config = toml::from_str(
+        r#"
+default_text_model = "deepseek-v4-flash"
+migrated_deepseek_model_alias = "deepseek-chat"
+"#,
+    )
+    .expect("deserialize config");
+    assert!(config.migrated_deepseek_model_alias.is_none());
+}
+
+#[test]
 fn retired_deepseek_aliases_keep_mode_intent_unless_effort_is_explicit() {
     for (alias, expected_effort) in [("deepseek-chat", "off"), ("deepseek-reasoner", "high")] {
         for provider in [
@@ -4360,6 +4374,11 @@ fn retired_deepseek_aliases_from_env_are_migrated_before_runtime() -> Result<()>
                 .and_then(|entry| entry.model.as_deref())
         );
         assert_eq!(config.reasoning_effort(), Some(expected_effort));
+        let deprecation = config
+            .active_deepseek_alias_deprecation()
+            .expect("loaded config should retain the alias migration receipt");
+        assert_eq!(deprecation.alias, alias);
+        assert_eq!(deprecation.replacement, DEEPSEEK_ALIAS_REPLACEMENT);
     }
 
     Ok(())

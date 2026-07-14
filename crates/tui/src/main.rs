@@ -4764,6 +4764,7 @@ fn provider_capability_report(config: &Config) -> serde_json::Value {
     let model = config.default_model();
 
     let cap = crate::config::provider_capability(provider, &model);
+    let alias_deprecation = config.active_deepseek_alias_deprecation();
 
     json!({
         "resolved_provider": provider.as_str(),
@@ -4773,7 +4774,7 @@ fn provider_capability_report(config: &Config) -> serde_json::Value {
         "thinking_supported": cap.thinking_supported,
         "cache_telemetry_supported": cap.cache_telemetry_supported,
         "request_payload_mode": serde_json::to_value(cap.request_payload_mode).unwrap_or_default(),
-        "alias_deprecation": cap.alias_deprecation,
+        "alias_deprecation": alias_deprecation,
     })
 }
 
@@ -9892,16 +9893,18 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn provider_capability_report_exposes_alias_deprecation_for_deepseek_chat() {
-        let config = Config {
+        let mut config = Config {
             default_text_model: Some("deepseek-chat".to_string()),
             ..Default::default()
         };
+        crate::config::normalize_model_config_for_test(&mut config);
 
         let report = provider_capability_report(&config);
 
-        assert_eq!(report["resolved_model"], "deepseek-chat");
+        assert_eq!(report["resolved_model"], "deepseek-v4-flash");
         assert_eq!(report["context_window"], 1_000_000);
         assert_eq!(report["thinking_supported"], true);
+        assert_eq!(report["alias_deprecation"]["alias"], "deepseek-chat");
         assert_eq!(
             report["alias_deprecation"]["replacement"],
             "deepseek-v4-flash"
@@ -9910,6 +9913,21 @@ mod doctor_endpoint_tests {
             report["alias_deprecation"]["retirement_utc"],
             "2026-07-24T15:59:00Z"
         );
+    }
+
+    #[test]
+    fn provider_capability_report_preserves_custom_deepseek_alias_namespace() {
+        let mut config = Config {
+            base_url: Some("https://models.example/v1".to_string()),
+            default_text_model: Some("deepseek-chat".to_string()),
+            ..Default::default()
+        };
+        crate::config::normalize_model_config_for_test(&mut config);
+
+        let report = provider_capability_report(&config);
+
+        assert_eq!(report["resolved_model"], "deepseek-chat");
+        assert!(report["alias_deprecation"].is_null());
     }
 
     #[test]
