@@ -1885,9 +1885,20 @@ mod tests {
             hint.contains("reasoning"),
             "hint should include registry reasoning support: {hint}"
         );
+        // MiniMax-M3 ships without verified per-token pricing, so the hint
+        // surfaces that honestly instead of inventing a rate.
         assert!(
-            hint.contains("priced") || hint.contains("per Mtok") || hint.contains("$"),
-            "hint should include pricing availability: {hint}"
+            hint.contains("price unknown"),
+            "hint should surface honest pricing availability: {hint}"
+        );
+
+        // A priced registry row still surfaces its stated rate.
+        let priced_hint = picker_model_hint("minimax/minimax-m2.7", None);
+        assert!(
+            priced_hint.contains("priced")
+                || priced_hint.contains("per Mtok")
+                || priced_hint.contains("$"),
+            "hint should include pricing for a priced row: {priced_hint}"
         );
     }
 

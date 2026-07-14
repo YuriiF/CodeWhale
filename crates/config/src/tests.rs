@@ -3817,14 +3817,15 @@ fn provider_metadata_defaults_match_runtime_helpers() {
         if kind != ProviderKind::Custom {
             assert!(!provider.env_vars().is_empty());
         }
-        // OpenAI Codex (ChatGPT) speaks the Responses API and Anthropic
-        // speaks the native Messages API; every other built-in provider
-        // is OpenAI-compatible Chat Completions.
+        // OpenAI Codex (ChatGPT) speaks the Responses API; Anthropic and the
+        // Anthropic-compatible routes speak the native Messages API; every
+        // other built-in provider is OpenAI-compatible Chat Completions.
         let expected_wire = match kind {
             ProviderKind::OpenaiCodex => provider::WireFormat::Responses,
-            ProviderKind::Anthropic | ProviderKind::DeepseekAnthropic | ProviderKind::Openmodel => {
-                provider::WireFormat::AnthropicMessages
-            }
+            ProviderKind::Anthropic
+            | ProviderKind::DeepseekAnthropic
+            | ProviderKind::MinimaxAnthropic
+            | ProviderKind::Openmodel => provider::WireFormat::AnthropicMessages,
             _ => provider::WireFormat::ChatCompletions,
         };
         assert_eq!(provider.wire(), expected_wire);
