@@ -144,15 +144,16 @@ pub struct RecordedTurn {
     pub provider: Option<String>,
     #[serde(default, alias = "effective_billing_surface")]
     pub billing_surface: Option<String>,
-    #[serde(alias = "effective_model")]
+    #[serde(default, alias = "effective_model")]
     pub model: String,
-    pub usage: Usage,
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 impl RecordedTurn {
     #[must_use]
     pub fn contributes_to_scorecard(&self) -> bool {
-        self.model_backed.unwrap_or(true)
+        self.model_backed.unwrap_or(true) && self.usage.is_some() && !self.model.trim().is_empty()
     }
 }
 
@@ -221,19 +222,20 @@ impl Scorecard {
     /// while excluding explicitly non-model lifecycle rows.
     #[must_use]
     pub fn from_recorded_turns(turns: &[RecordedTurn]) -> Self {
-        Self::from_turn_refs(
-            turns
-                .iter()
-                .filter(|turn| turn.contributes_to_scorecard())
-                .map(|turn| ScorecardTurnRef {
-                    turn_id: &turn.turn_id,
-                    created_at: turn.created_at.as_ref(),
-                    provider: turn.provider.as_deref(),
-                    billing_surface: turn.billing_surface.as_deref(),
-                    model: &turn.model,
-                    usage: &turn.usage,
-                }),
-        )
+        Self::from_turn_refs(turns.iter().filter_map(|turn| {
+            if !turn.contributes_to_scorecard() {
+                return None;
+            }
+            let usage = turn.usage.as_ref()?;
+            Some(ScorecardTurnRef {
+                turn_id: &turn.turn_id,
+                created_at: turn.created_at.as_ref(),
+                provider: turn.provider.as_deref(),
+                billing_surface: turn.billing_surface.as_deref(),
+                model: &turn.model,
+                usage,
+            })
+        }))
     }
 
     fn from_turn_refs<'a>(turns: impl IntoIterator<Item = ScorecardTurnRef<'a>>) -> Self {
@@ -407,6 +409,14 @@ impl ScorecardMetrics {
                 current: 0.0,
                 pct_increase: 100.0,
             });
+        } else if self.cny_cost_complete && baseline.cny_cost_complete {
+            push_regression(
+                &mut out,
+                "total_cost_cny",
+                baseline.total_cost_cny,
+                self.total_cost_cny,
+                threshold_pct,
+            );
         }
         push_regression(
             &mut out,
@@ -948,7 +958,7 @@ mod tests {
             provider: Some(provider.to_string()),
             billing_surface: billing_surface.map(str::to_string),
             model: model.to_string(),
-            usage: u.clone(),
+            usage: Some(u.clone()),
         };
         let turns = [
             recorded(
@@ -1051,6 +1061,27 @@ mod tests {
         );
         assert_eq!(recorded.model, "gpt-5.5");
         assert!(recorded.contributes_to_scorecard());
+    }
+
+    #[test]
+    fn runtime_turn_without_usage_is_readable_and_filtered() {
+        let recorded: RecordedTurn = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "id": "queued-runtime-turn",
+            "thread_id": "thread-1",
+            "status": "queued",
+            "input_summary": "waiting to run",
+            "created_at": "2026-07-12T10:30:00Z",
+            "effective_provider": "openai",
+            "effective_model": "gpt-5.5"
+        }))
+        .expect("parse runtime row before usage is recorded");
+
+        assert!(recorded.usage.is_none());
+        assert!(!recorded.contributes_to_scorecard());
+        let card = Scorecard::from_recorded_turns(&[recorded]);
+        assert_eq!(card.metrics.turns, 0);
+        assert!(card.per_turn.is_empty());
     }
 
     #[test]
@@ -1179,6 +1210,22 @@ mod tests {
             regs.iter()
                 .any(|r| r.metric == "cny_cost_completeness_drop")
         );
+    }
+
+    #[test]
+    fn regression_flags_complete_cny_cost_increase() {
+        let baseline = ScorecardMetrics {
+            cny_cost_complete: true,
+            total_cost_cny: 0.70,
+            ..Default::default()
+        };
+        let current = ScorecardMetrics {
+            total_cost_cny: 1.40,
+            ..baseline.clone()
+        };
+
+        let regs = current.regressions_against(&baseline, 5.0);
+        assert!(regs.iter().any(|r| r.metric == "total_cost_cny"));
     }
 
     #[test]
