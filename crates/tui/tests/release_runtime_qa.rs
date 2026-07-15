@@ -740,7 +740,18 @@ async fn release_bench_thirty_two_worker_fanout_stays_live() -> Result<()> {
     )?;
     wait_for_counter(&mut tui, &child_requests, WORKERS, Duration::from_secs(60))?;
     let all_children_live = spawn_started.elapsed();
-    tui.wait_for_text(&format!("{WORKERS} running"), Duration::from_secs(10))?;
+    // The Ocean work surface reports both the active count and the worker
+    // count in its compact summary. Do not couple this runtime benchmark to
+    // the retired sidebar phrase ("N running").
+    tui.wait_for(
+        |frame| {
+            let text = frame.text();
+            (text.contains(&format!("Active {WORKERS}"))
+                && text.contains(&format!("Workers {WORKERS}")))
+                || (text.contains(&format!("run ×{WORKERS}")) && text.contains("[open] [stop]"))
+        },
+        Duration::from_secs(10),
+    )?;
     let sidebar_visible = spawn_started.elapsed();
     let rss_storm = pid.and_then(rss_kib);
 
