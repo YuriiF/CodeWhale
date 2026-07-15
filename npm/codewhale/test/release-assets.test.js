@@ -125,3 +125,10 @@ test("assertPackageVersionMatchesBinaryVersion allows packaging-only releases on
     }
   }
 });
+
+test("npm publication is guarded by an exact clean release-tag checkout", () => {
+  assert.match(
+    pkg.scripts.prepublishOnly,
+    /require-release-tag-checkout\.sh && node scripts\/verify-release-assets\.js/,
+  );
+});

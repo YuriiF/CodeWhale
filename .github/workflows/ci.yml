@@ -142,6 +142,7 @@ jobs:
       - name: Check release helper contracts
         run: |
           bash scripts/release/generate-release-body.test.sh
+          bash scripts/release/verify-remote-tag.test.sh
           bash .github/scripts/update-homebrew-tap.test.sh
 
   lint:

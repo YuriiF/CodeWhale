@@ -121,12 +121,16 @@ If the workflow is healthy but happened to fail on the release run
 without pushing anything:
 
 ```bash
-gh workflow run sync-cnb.yml --repo Hmbown/CodeWhale
+# Prefer rerunning the existing failed tag run when one exists.
+gh run rerun <failed-tag-run-id> --repo Hmbown/CodeWhale
+
+# If no tag run exists, dispatch from the exact existing release tag.
+gh workflow run sync-cnb.yml --repo Hmbown/CodeWhale --ref vX.Y.Z
 ```
 
-`workflow_dispatch` runs against the workflow's default branch
-(`main`), so this will sync the current `main` to CNB. To re-sync
-a specific tag, the manual `git push cnb` path above is the way.
+Do not omit `--ref` when repairing a tag: a default-branch dispatch syncs
+`main`, not `refs/tags/vX.Y.Z`. Afterward, prove the tag and its Linux x64
+release assets exist before directing users to CNB.
 
 ## Rotating `CNB_GIT_TOKEN`
 
