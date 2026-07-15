@@ -311,7 +311,9 @@ struct WorkerStream {
     log_path: std::path::PathBuf,
     host: WorkerStreamHost,
     offset: u64,
-    pending: String,
+    // Keep incomplete stream frames as bytes. Decoding each read separately
+    // corrupts valid UTF-8 when a multibyte code point crosses a read boundary.
+    pending: Vec<u8>,
     terminal: bool,
     terminal_route: TerminalRouteEvidence,
 }
@@ -348,6 +350,22 @@ impl TerminalRouteEvidence {
             Self::Missing | Self::InvalidOrAmbiguous => None,
         }
     }
+}
+
+fn observe_worker_stream_line(
+    terminal_route: &mut TerminalRouteEvidence,
+    line: &[u8],
+) -> Option<FleetWorkerEventPayload> {
+    let Ok(line) = std::str::from_utf8(line) else {
+        // stream-json is a UTF-8 contract. Never accept a lossy-decoded route
+        // receipt: replacement characters could turn corrupt provider/model
+        // bytes into apparently valid provenance.
+        terminal_route.observe(ParsedTerminalRoute::Invalid);
+        return None;
+    };
+    let line = line.trim_end();
+    terminal_route.observe(parse_exec_terminal_route(line));
+    map_exec_stream_line(line)
 }
 
 enum WorkerStreamHost {
@@ -433,7 +451,7 @@ impl FleetExecutor {
                 log_path: handle.log_path.clone(),
                 host,
                 offset: 0,
-                pending: String::new(),
+                pending: Vec::new(),
                 terminal: false,
                 terminal_route: TerminalRouteEvidence::default(),
             },
@@ -510,14 +528,10 @@ impl FleetExecutor {
         let mut buf = Vec::new();
         if let Ok(read) = file.read_to_end(&mut buf) {
             stream.offset += read as u64;
-            stream.pending.push_str(&String::from_utf8_lossy(&buf));
-            while let Some(idx) = stream.pending.find('\n') {
-                let line: String = stream.pending.drain(..=idx).collect();
-                let line = line.trim_end();
-                stream
-                    .terminal_route
-                    .observe(parse_exec_terminal_route(line));
-                if let Some(event) = map_exec_stream_line(line) {
+            stream.pending.extend_from_slice(&buf);
+            while let Some(idx) = stream.pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = stream.pending.drain(..=idx).collect();
+                if let Some(event) = observe_worker_stream_line(&mut stream.terminal_route, &line) {
                     events.push(event);
                 }
             }
@@ -567,14 +581,11 @@ impl FleetExecutor {
         let mut tail_payloads = self.drain_events(worker_id);
         if let Some(stream) = self.streams.get_mut(worker_id) {
             let trailing_line = std::mem::take(&mut stream.pending);
-            let trailing_line = trailing_line.trim();
-            if !trailing_line.is_empty() {
-                stream
-                    .terminal_route
-                    .observe(parse_exec_terminal_route(trailing_line));
-                if let Some(payload) = map_exec_stream_line(trailing_line) {
-                    tail_payloads.push(payload);
-                }
+            if trailing_line.iter().any(|byte| !byte.is_ascii_whitespace())
+                && let Some(payload) =
+                    observe_worker_stream_line(&mut stream.terminal_route, &trailing_line)
+            {
+                tail_payloads.push(payload);
             }
         }
         if let Some(stream) = self.streams.get_mut(worker_id) {
@@ -661,6 +672,35 @@ mod tests {
             source: std::path::PathBuf::from(format!("{id}.toml")),
             origin: crate::fleet::roster::ProfileOrigin::Workspace,
         }
+    }
+
+    fn track_test_stream(
+        executor: &mut FleetExecutor,
+        worker_id: &str,
+        log_path: std::path::PathBuf,
+    ) {
+        executor.streams.insert(
+            worker_id.to_string(),
+            WorkerStream {
+                log_path,
+                host: WorkerStreamHost::Local,
+                offset: 0,
+                pending: Vec::new(),
+                terminal: false,
+                terminal_route: TerminalRouteEvidence::default(),
+            },
+        );
+    }
+
+    fn append_test_stream(path: &std::path::Path, bytes: &[u8]) {
+        use std::io::Write as _;
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
     }
 
     #[test]
@@ -1248,6 +1288,100 @@ mod tests {
             matches!(terminals["w-fail"], FleetWorkerEventPayload::Failed { .. }),
             "injected-failure worker should fail, got {:?}",
             terminals["w-fail"]
+        );
+    }
+
+    #[test]
+    fn terminal_route_preserves_multibyte_identity_across_read_boundaries() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log_path = tmp.path().join("split-utf8.jsonl");
+        std::fs::write(&log_path, []).unwrap();
+        let mut executor = FleetExecutor::new(tmp.path());
+        track_test_stream(&mut executor, "split-utf8", log_path.clone());
+
+        let provider_id = "深海鲸-供应商";
+        let model = "深潜-模型";
+        let line = format!(
+            "{{\"type\":\"metadata\",\"meta\":{{\"receipt_kind\":\"terminal\",\"provider\":\"custom\",\"provider_id\":\"{provider_id}\",\"model\":\"{model}\"}}}}\n"
+        );
+        let bytes = line.as_bytes();
+        let provider_start = bytes
+            .windows("鲸".len())
+            .position(|window| window == "鲸".as_bytes())
+            .unwrap();
+        let model_start = bytes
+            .windows("潜".len())
+            .position(|window| window == "潜".as_bytes())
+            .unwrap();
+        let provider_split = provider_start + 1;
+        let model_split = model_start + 2;
+
+        append_test_stream(&log_path, &bytes[..provider_split]);
+        assert!(executor.drain_events("split-utf8").is_empty());
+        append_test_stream(&log_path, &bytes[provider_split..model_split]);
+        assert!(executor.drain_events("split-utf8").is_empty());
+        append_test_stream(&log_path, &bytes[model_split..]);
+        assert!(executor.drain_events("split-utf8").is_empty());
+
+        let route = executor
+            .streams
+            .get("split-utf8")
+            .and_then(|stream| stream.terminal_route.reported_route())
+            .expect("one exact terminal route");
+        assert_eq!(route.provider, "custom");
+        assert_eq!(route.provider_exact_id.as_deref(), Some(provider_id));
+        assert_eq!(route.model, model);
+    }
+
+    #[test]
+    fn invalid_utf8_terminal_route_fails_closed_without_lossy_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log_path = tmp.path().join("invalid-utf8.jsonl");
+        let mut line = br#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"remote-x","model":"worker-model"}}"#.to_vec();
+        let invalid_at = line
+            .windows(b"remote-x".len())
+            .position(|window| window == b"remote-x")
+            .unwrap()
+            + 3;
+        line[invalid_at] = 0xff;
+        line.push(b'\n');
+        std::fs::write(&log_path, line).unwrap();
+
+        let mut executor = FleetExecutor::new(tmp.path());
+        track_test_stream(&mut executor, "invalid-utf8", log_path);
+        assert!(executor.drain_events("invalid-utf8").is_empty());
+        assert!(matches!(
+            executor
+                .streams
+                .get("invalid-utf8")
+                .map(|stream| &stream.terminal_route),
+            Some(TerminalRouteEvidence::InvalidOrAmbiguous)
+        ));
+    }
+
+    #[test]
+    fn invalid_utf8_nonterminal_line_cannot_synthesize_route_evidence() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log_path = tmp.path().join("invalid-nonterminal.jsonl");
+        let mut line = br#"{"type":"content","delta":"ordinary-output"}"#.to_vec();
+        let invalid_at = line
+            .windows(b"ordinary-output".len())
+            .position(|window| window == b"ordinary-output")
+            .unwrap()
+            + 4;
+        line[invalid_at] = 0xff;
+        line.push(b'\n');
+        std::fs::write(&log_path, line).unwrap();
+
+        let mut executor = FleetExecutor::new(tmp.path());
+        track_test_stream(&mut executor, "invalid-nonterminal", log_path);
+        assert!(executor.drain_events("invalid-nonterminal").is_empty());
+        assert!(
+            executor
+                .streams
+                .get("invalid-nonterminal")
+                .and_then(|stream| stream.terminal_route.reported_route())
+                .is_none()
         );
     }
 }
