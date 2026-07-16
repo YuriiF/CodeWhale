@@ -6909,13 +6909,14 @@ async fn run_subagent(
             messages.push(child_completion_runtime_message(&child_completions));
         }
 
+        let has_tools = !tools.is_empty();
         let request = MessageRequest {
             model: runtime.model.clone(),
             messages: messages.clone(),
             max_tokens: SUBAGENT_RESPONSE_MAX_TOKENS,
             system: Some(request_system.clone()),
-            tools: Some(tools.clone()),
-            tool_choice: Some(json!({ "type": "auto" })),
+            tools: has_tools.then(|| tools.clone()),
+            tool_choice: has_tools.then(|| json!({ "type": "auto" })),
             metadata: None,
             thinking: None,
             reasoning_effort: runtime.reasoning_effort.clone(),

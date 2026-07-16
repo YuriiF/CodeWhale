@@ -697,6 +697,47 @@ async fn delayed_chat_client(
     (client, calls, bodies)
 }
 
+#[tokio::test]
+async fn tool_free_subagent_omits_chat_tools_and_tool_choice() {
+    let tmp = tempdir().expect("tempdir");
+    let (client, calls, bodies) = delayed_chat_client(Duration::ZERO, "done").await;
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        2,
+    )));
+    let mut runtime = stub_runtime();
+    runtime.client = client;
+    runtime.manager = manager;
+    runtime.context = ToolContext::new(tmp.path());
+    let (_input_tx, input_rx) = mpsc::unbounded_channel();
+
+    let result = run_subagent(
+        &runtime,
+        "agent_no_tools_request".to_string(),
+        SubAgentType::General,
+        "Return a final answer without tools.".to_string(),
+        make_assignment(),
+        Some(Vec::new()),
+        false,
+        Instant::now(),
+        1,
+        None,
+        input_rx,
+    )
+    .await
+    .expect("tool-free sub-agent should complete");
+
+    assert_eq!(result.status, SubAgentStatus::Completed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let bodies = bodies.lock().expect("request body recorder mutex poisoned");
+    let body = bodies.first().expect("one chat request body");
+    assert!(body.get("tools").is_none(), "tools must be omitted: {body}");
+    assert!(
+        body.get("tool_choice").is_none(),
+        "tool_choice must be omitted: {body}"
+    );
+}
+
 async fn transient_header_timeout_then_success_chat_client(
     response_text: &str,
 ) -> (DeepSeekClient, Arc<AtomicUsize>) {
