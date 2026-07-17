@@ -25,7 +25,7 @@ interface ChatResponse {
 
 export interface AgentDraft {
   id: string;
-  type: "triage" | "pr-review" | "stale" | "dupes" | "digest";
+  type: "triage" | "pr-review" | "stale" | "dupes" | "digest" | "linkcheck" | "semantic-drift";
   targetNumber?: number;
   targetUrl?: string;
   bodyEn: string;
@@ -221,8 +221,17 @@ export async function getAgentEnv(): Promise<CommunityAgentEnv> {
 
 export async function saveDraft(kv: KVNamespace | undefined, draft: AgentDraft): Promise<void> {
   if (!kv) return;
-  const key = `draft:${draft.type}:${draft.id}`;
-  await kv.put(key, JSON.stringify(draft), { expirationTtl: 60 * 60 * 24 * 30 }); // 30 days
+  await kv.put(draftStorageKey(draft), JSON.stringify(draft), { expirationTtl: 60 * 60 * 24 * 30 }); // 30 days
+}
+
+/**
+ * The one canonical KV key for a draft. Writers (saveDraft), dedup lookups
+ * (hasFreshDraft, the content watchers), and the /admin review surface must
+ * all derive keys through this helper so a draft's identity can never drift
+ * between the key that is checked and the key that is written.
+ */
+export function draftStorageKey(draft: Pick<AgentDraft, "type" | "id">): string {
+  return `draft:${draft.type}:${draft.id}`;
 }
 
 export async function getDraft(kv: KVNamespace | undefined, key: string): Promise<AgentDraft | null> {
@@ -319,13 +328,12 @@ export async function logUsage(
 
 export async function hasFreshDraft(
   kv: KVNamespace | undefined,
-  type: string,
+  type: AgentDraft["type"],
   id: string,
   updatedAt: string
 ): Promise<boolean> {
   if (!kv) return false;
-  const key = `draft:${type}:${id}`;
-  const existing = await getDraft(kv, key);
+  const existing = await getDraft(kv, draftStorageKey({ type, id }));
   if (!existing) return false;
   // Skip if draft is newer than the item's last update
   return new Date(existing.generatedAt) > new Date(updatedAt);
