@@ -584,8 +584,27 @@ fn bundled_asset_yields_real_chat_offerings_for_key_models() {
     assert_eq!(glm.limit.as_ref().and_then(|l| l.context), Some(1_000_000));
     assert!(glm.default_for_provider);
 
-    let kimi = find(&rows, "moonshot", "kimi-k2.7-code");
-    assert_eq!(kimi.limit.as_ref().and_then(|l| l.context), Some(262_144));
+    let kimi_k27 = find(&rows, "moonshot", "kimi-k2.7-code");
+    assert_eq!(
+        kimi_k27.limit.as_ref().and_then(|l| l.context),
+        Some(262_144)
+    );
+
+    let kimi_k3 = find(&rows, "moonshot", "kimi-k3");
+    assert_eq!(
+        kimi_k3.limit.as_ref().and_then(|l| l.context),
+        Some(1_048_576)
+    );
+    assert_eq!(kimi_k3.limit.as_ref().and_then(|l| l.output), Some(131_072));
+    let kimi_k3_input_modalities = kimi_k3
+        .modalities
+        .as_ref()
+        .expect("K3 modalities")
+        .input
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(kimi_k3_input_modalities, ["text", "image", "video"]);
 
     let minimax_m3 = find(&rows, "minimax-anthropic", "MiniMax-M3");
     assert_eq!(

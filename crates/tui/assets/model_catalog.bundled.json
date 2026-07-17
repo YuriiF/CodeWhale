@@ -90,6 +90,15 @@
       "supported_parameters": ["reasoning"],
       "provenance": "bundled"
     },
+    "kimi-k3": {
+      "id": "kimi-k3",
+      "context_window": 1048576,
+      "max_output": 131072,
+      "supports_reasoning": true,
+      "modalities": ["text", "image", "video"],
+      "supported_parameters": ["reasoning"],
+      "provenance": "bundled"
+    },
     "kimi-k2.7-code": {
       "id": "kimi-k2.7-code",
       "context_window": 262144,

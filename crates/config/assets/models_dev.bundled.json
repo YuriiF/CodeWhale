@@ -6,7 +6,7 @@
     "source": "Compact offline seed of verified in-repo defaults (context/output from crates/tui/src/models.rs; USD pricing from crates/tui/src/pricing.rs) for providers Codewhale ships with. It is intentionally smaller than a full Models.dev dump; live refresh supersedes these rows on (provider, wire_model_id) identity.",
     "honesty": "Pricing is intentionally OMITTED where the repo does not publish a trustworthy per-token rate: DeepSeek-native rows (priced via the time-aware DeepSeek table elsewhere, kept UnknownOrStale at the route layer), aggregator-hosted DeepSeek rows (aggregator account terms, not DeepSeek Platform pricing), and Xiaomi MiMo rows (published PAYG rates apply only to sk- pay-as-you-go keys; the catalog cannot distinguish that billing surface from credit/quota Token Plan keys, so MiMo stays unpriced). Absent pricing surfaces as PricingSku::UnknownOrStale, never a fabricated zero.",
     "default_rows": "Each provider's `default: true` wire id equals that provider's built-in DEFAULT_*_MODEL so RouteResolver::new() and the descriptor stay in agreement when offline.",
-    "coverage": "15 providers, 44 chat offerings (offline seed only)."
+    "coverage": "15 providers, 45 chat offerings (offline seed only)."
   },
   "models": {
     "deepseek-v4-pro": {
@@ -109,6 +109,15 @@
       "npm": "@ai-sdk/openai-compatible",
       "env": ["MOONSHOT_API_KEY", "KIMI_API_KEY"],
       "models": {
+        "kimi-k3": {
+          "id": "kimi-k3",
+          "name": "Kimi K3",
+          "family": "kimi-k3",
+          "reasoning": true,
+          "tool_call": true,
+          "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
+          "limit": { "context": 1048576, "output": 131072 }
+        },
         "kimi-k2.7-code": {
           "id": "kimi-k2.7-code",
           "name": "Kimi K2.7 Code",

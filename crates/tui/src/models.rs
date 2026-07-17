@@ -986,6 +986,7 @@ mod tests {
         // ids without the OpenRouter vendor prefix; both spellings must
         // resolve identical metadata (#1310 ride-along on #3023).
         for (model, expected_window) in [
+            ("kimi-k3", 1_048_576),
             ("kimi-k2.7-code", 262_144),
             ("kimi-k2.6", 262_144),
             ("minimax-m3", 1_000_000),
@@ -1014,6 +1015,7 @@ mod tests {
         assert_eq!(max_output_tokens_for_model("kimi-k2.7-code"), Some(32_768));
         assert_eq!(max_output_tokens_for_model("kimi-k2.6"), Some(32_768));
         assert_eq!(max_output_tokens_for_model("kimi-for-coding"), Some(32_768));
+        assert_eq!(max_output_tokens_for_model("kimi-k3"), Some(131_072));
         assert_eq!(max_output_tokens_for_model("minimax-m3"), Some(524_288));
         assert_eq!(max_output_tokens_for_model("glm-5.1"), Some(131_072));
         assert_eq!(max_output_tokens_for_model("glm-5.2"), Some(131_072));

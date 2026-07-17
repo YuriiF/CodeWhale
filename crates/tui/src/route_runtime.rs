@@ -323,6 +323,25 @@ mod tests {
     }
 
     #[test]
+    fn moonshot_k3_route_uses_bundled_1m_context() {
+        let candidate =
+            resolve_route_candidate(ApiProvider::Moonshot, Some("kimi-k3"), None, None, None)
+                .expect("Moonshot Kimi K3 route");
+
+        assert_eq!(candidate.wire_model_id.as_str(), "kimi-k3");
+        assert_eq!(candidate.limits.context_tokens, Some(1_048_576));
+        assert_eq!(candidate.limits.output_tokens, Some(131_072));
+        assert_eq!(
+            crate::route_budget::route_context_window_tokens(
+                ApiProvider::Moonshot,
+                "kimi-k3",
+                Some(candidate.limits),
+            ),
+            1_048_576
+        );
+    }
+
+    #[test]
     fn runtime_route_without_model_uses_target_provider_default() {
         let config = Config {
             provider: Some("openrouter".to_string()),

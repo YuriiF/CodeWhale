@@ -547,11 +547,17 @@ fn default_resolver_yields_real_facts_from_bundled_catalog() {
 
     // A Kimi row (Moonshot) likewise resolves with its real window — a model
     // the 4-row seam never knew about at all.
-    let kimi = r
+    let kimi_k27 = r
         .resolve(&req(Some(ProviderKind::Moonshot), Some("kimi-k2.7-code")))
         .expect("Moonshot kimi-k2.7-code should resolve from the bundled catalog");
-    assert_eq!(kimi.limits.context_tokens, Some(262_144));
-    assert_eq!(kimi.limits.output_tokens, Some(262_144));
+    assert_eq!(kimi_k27.limits.context_tokens, Some(262_144));
+    assert_eq!(kimi_k27.limits.output_tokens, Some(262_144));
+
+    let kimi_k3 = r
+        .resolve(&req(Some(ProviderKind::Moonshot), Some("kimi-k3")))
+        .expect("Moonshot kimi-k3 should resolve from the bundled catalog");
+    assert_eq!(kimi_k3.limits.context_tokens, Some(1_048_576));
+    assert_eq!(kimi_k3.limits.output_tokens, Some(131_072));
 
     // With the #3085 pricing keystone present on the release branch, the asset's
     // provider-scoped `cost` now projects onto the candidate via
