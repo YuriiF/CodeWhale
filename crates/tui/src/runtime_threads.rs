@@ -949,7 +949,20 @@ impl RuntimeThreadStore {
             // error. If rollback itself fails, classify the write as
             // indeterminate so callers never restore/retry and duplicate a
             // possibly committed terminal receipt.
-            let rollback_result = file.set_len(original_len).and_then(|()| file.sync_all());
+            // Rust intentionally opens append-mode files on Windows without
+            // FILE_WRITE_DATA. That preserves kernel append semantics but
+            // means the append handle cannot truncate. Reopen the exact path
+            // with ordinary write authority only on the failure path so the
+            // success path remains an atomic append on every platform.
+            drop(file);
+            let rollback_result =
+                OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .and_then(|rollback_file| {
+                        rollback_file.set_len(original_len)?;
+                        rollback_file.sync_all()
+                    });
             let error = match rollback_result {
                 Ok(()) => RuntimeEventAppendError {
                     disposition: EventAppendFailureDisposition::RolledBack,
