@@ -2,7 +2,7 @@ use super::*;
 use crate::core::engine::{MockApprovalEvent, mock_engine_handle};
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
 use std::time::{Duration, Instant};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -3520,6 +3520,113 @@ async fn user_input_snapshot_survives_reload_and_clears_after_submission() -> Re
             base_url: None,
         })
         .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_detail_cursor_precedes_projection_reads_at_terminal_boundary() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "complete while the snapshot is paused".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+    manager.set_snapshot_test_hook(hook_tx);
+    let snapshot_manager = manager.clone();
+    let snapshot_thread_id = thread.id.clone();
+    let snapshot_task = tokio::spawn(async move {
+        snapshot_manager
+            .get_thread_detail(&snapshot_thread_id)
+            .await
+    });
+
+    let point = tokio::time::timeout(Duration::from_secs(2), hook_rx.recv())
+        .await
+        .context("snapshot did not capture its replay cursor")?
+        .context("snapshot test hook closed")?;
+    assert_eq!(point.thread_id, thread.id);
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "snapshot_terminal".to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::MessageStarted { index: 0 })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::MessageComplete { index: 0 })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+
+    let completed_event = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(event) = manager
+                .events_since(&thread.id, Some(point.latest_seq))?
+                .into_iter()
+                .find(|event| {
+                    event.turn_id.as_deref() == Some(&turn.id) && event.event == "turn.completed"
+                })
+            {
+                break Ok::<_, anyhow::Error>(event);
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("terminal event did not cross the paused snapshot boundary")??;
+    point
+        .resume
+        .send(())
+        .map_err(|_| anyhow!("snapshot dropped its resume barrier"))?;
+
+    let detail = snapshot_task.await.context("snapshot task panicked")??;
+    assert_eq!(detail.latest_seq, point.latest_seq);
+    assert!(completed_event.seq > detail.latest_seq);
+    assert_eq!(
+        detail
+            .turns
+            .iter()
+            .find(|record| record.id == turn.id)
+            .map(|record| record.status),
+        Some(RuntimeTurnStatus::Completed),
+        "the snapshot should contain the concurrently saved terminal projection"
+    );
+    assert!(
+        manager
+            .events_since(&thread.id, Some(detail.latest_seq))?
+            .iter()
+            .any(|event| event.seq == completed_event.seq),
+        "the same terminal transition must remain replayable from the snapshot cursor"
+    );
     Ok(())
 }
 

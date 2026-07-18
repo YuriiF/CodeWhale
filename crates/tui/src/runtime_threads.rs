@@ -22,6 +22,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(test)]
+use tokio::sync::mpsc;
 use tokio::sync::{Mutex, broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -1057,6 +1059,15 @@ pub struct RuntimeThreadManager {
         Arc<parking_lot::Mutex<HashMap<(String, String), PendingUserInputRequest>>>,
     pending_dynamic_tools:
         Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<DynamicToolCallResult>>>>,
+    #[cfg(test)]
+    snapshot_test_hook: Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<SnapshotTestPoint>>>>,
+}
+
+#[cfg(test)]
+pub(crate) struct SnapshotTestPoint {
+    pub thread_id: String,
+    pub latest_seq: u64,
+    pub resume: oneshot::Sender<()>,
 }
 
 /// Helper types for `seed_thread_from_messages` — intermediate representation
@@ -1291,6 +1302,8 @@ impl RuntimeThreadManager {
             pending_approvals: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pending_dynamic_tools: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            snapshot_test_hook: Arc::new(parking_lot::Mutex::new(None)),
         };
         manager.recover_interrupted_state()?;
         Ok(manager)
@@ -1601,6 +1614,11 @@ impl RuntimeThreadManager {
     ) -> Result<RuntimeEventRecord> {
         self.emit_event(thread_id, turn_id, None, event, payload)
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_snapshot_test_hook(&self, hook: mpsc::UnboundedSender<SnapshotTestPoint>) {
+        *self.snapshot_test_hook.lock() = Some(hook);
     }
 
     pub async fn create_thread(&self, req: CreateThreadRequest) -> Result<ThreadRecord> {
@@ -1997,6 +2015,29 @@ impl RuntimeThreadManager {
     }
 
     pub async fn get_thread_detail(&self, id: &str) -> Result<ThreadDetail> {
+        // Treat the cursor as a lower watermark for the projection reads that
+        // follow. A concurrent save+emit can then be represented in both the
+        // snapshot and replay (authoritative records are upserted and event
+        // sequences are deduplicated), or only in replay, but it cannot be
+        // absent from both while the cursor skips its event.
+        let latest_seq = self.store.current_seq().await;
+
+        #[cfg(test)]
+        let snapshot_test_hook = { self.snapshot_test_hook.lock().take() };
+        #[cfg(test)]
+        if let Some(hook) = snapshot_test_hook {
+            let (resume, wait_for_resume) = oneshot::channel();
+            hook.send(SnapshotTestPoint {
+                thread_id: id.to_string(),
+                latest_seq,
+                resume,
+            })
+            .map_err(|_| anyhow!("snapshot test hook closed"))?;
+            wait_for_resume
+                .await
+                .map_err(|_| anyhow!("snapshot test hook dropped resume"))?;
+        }
+
         let thread = self.get_thread(id).await?;
         let turns = self.store.list_turns_for_thread(id)?;
         let turn_ids: Vec<String> = turns.iter().map(|turn| turn.id.clone()).collect();
@@ -2007,12 +2048,6 @@ impl RuntimeThreadManager {
                 items.append(&mut turn_items);
             }
         }
-        let latest_seq = self.store.current_seq().await;
-        // Read attention state after the replay cursor. If a request is
-        // registered concurrently after this point, its required event will
-        // have a sequence newer than `latest_seq`; if its event was already
-        // sequenced, registration necessarily happened first and it appears
-        // in this snapshot unless it has already been resolved.
         let (pending_approvals, pending_user_inputs) = self.pending_requests_for_thread(id);
         Ok(ThreadDetail {
             thread,

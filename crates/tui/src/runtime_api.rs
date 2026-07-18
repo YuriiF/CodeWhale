@@ -2568,9 +2568,99 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                 None
             }
         }
-        "approval.required" => Some(sse_json("approval.required", payload.clone())),
-        "approval.decided" => Some(sse_json("approval.decided", payload.clone())),
-        "approval.timeout" => Some(sse_json("approval.timeout", payload.clone())),
+        "approval.required" => {
+            let approval_id = payload
+                .get("approval_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            Some(sse_json(
+                "approval.required",
+                json!({
+                    "id": approval_id,
+                    "approval_id": approval_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "tool_name": payload.get("tool_name"),
+                    "description": payload.get("description"),
+                    "intent_summary": payload.get("intent_summary"),
+                }),
+            ))
+        }
+        "approval.decided" => {
+            let approval_id = payload
+                .get("approval_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            Some(sse_json(
+                "approval.decided",
+                json!({
+                    "id": approval_id,
+                    "approval_id": approval_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "decision": payload.get("decision"),
+                    "remember": payload.get("remember"),
+                    "auto": payload.get("auto"),
+                    "timeout": payload.get("timeout"),
+                }),
+            ))
+        }
+        "approval.timeout" => {
+            let approval_id = payload
+                .get("approval_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            Some(sse_json(
+                "approval.timeout",
+                json!({
+                    "id": approval_id,
+                    "approval_id": approval_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "timeout_secs": payload.get("timeout_secs"),
+                }),
+            ))
+        }
+        "user_input.required" => {
+            let input_id = payload
+                .get("input_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            let request = payload.get("request")?.clone();
+            Some(sse_json(
+                "user_input.required",
+                json!({
+                    "id": input_id,
+                    "input_id": input_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "status": "required",
+                    "request": request,
+                }),
+            ))
+        }
+        "user_input.answered" | "user_input.canceled" => {
+            let input_id = payload
+                .get("input_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            let status = if event.event == "user_input.answered" {
+                "submitted"
+            } else {
+                "canceled"
+            };
+            Some(sse_json(
+                &event.event,
+                json!({
+                    "id": input_id,
+                    "input_id": input_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "status": status,
+                    "terminal": payload.get("terminal").and_then(Value::as_bool).unwrap_or(false),
+                }),
+            ))
+        }
         "sandbox.denied" => Some(sse_json("sandbox.denied", payload.clone())),
         "turn.completed" => {
             let usage = payload

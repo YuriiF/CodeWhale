@@ -108,6 +108,10 @@ export function applyRuntimeEvent(state, envelope) {
     || eventName === "item.completed"
     || eventName === "item.failed"
     || eventName === "item.interrupted"
+    || eventName === "agent.spawned"
+    || eventName === "agent.progress"
+    || eventName === "agent.completed"
+    || eventName === "agent.list"
   ) {
     if (payload.item) upsertItem(state, payload.item);
   } else if (eventName === "item.delta") {

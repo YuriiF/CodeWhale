@@ -837,6 +837,49 @@ async fn read_first_sse_frame(resp: reqwest::Response) -> Result<String> {
     }
 }
 
+fn take_complete_sse_frame(buffer: &mut Vec<u8>) -> Result<Option<String>> {
+    let text = String::from_utf8_lossy(buffer);
+    let lf = text.find("\n\n").map(|index| (index, 2));
+    let crlf = text.find("\r\n\r\n").map(|index| (index, 4));
+    let delimiter = match (lf, crlf) {
+        (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
+        (Some(found), None) | (None, Some(found)) => Some(found),
+        (None, None) => None,
+    };
+    let Some((index, delimiter_len)) = delimiter else {
+        return Ok(None);
+    };
+    let frame = String::from_utf8(buffer[..index].to_vec())?;
+    buffer.drain(..index + delimiter_len);
+    Ok(Some(frame))
+}
+
+async fn collect_sse_frames(
+    response: reqwest::Response,
+    frame_tx: mpsc::UnboundedSender<(String, serde_json::Value)>,
+) -> Result<Vec<(String, serde_json::Value)>> {
+    let mut stream = response.bytes_stream();
+    let mut buffer = Vec::new();
+    let mut frames = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        buffer.extend_from_slice(&chunk?);
+        while let Some(raw) = take_complete_sse_frame(&mut buffer)? {
+            if raw.trim().is_empty() || raw.trim_start().starts_with(':') {
+                continue;
+            }
+            let frame = parse_sse_frame(&raw)?;
+            frame_tx
+                .send(frame.clone())
+                .map_err(|_| anyhow::anyhow!("SSE frame observer closed"))?;
+            frames.push(frame);
+        }
+        if buffer.len() > 64 * 1024 {
+            bail!("SSE frame exceeded 64KB without delimiter");
+        }
+    }
+    Ok(frames)
+}
+
 #[cfg(unix)]
 fn write_fake_fleet_binary(root: &Path, marker: &Path) -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
@@ -2180,6 +2223,280 @@ async fn compatibility_stream_closes_losslessly_across_replay_live_handoff() -> 
 }
 
 #[tokio::test]
+async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_echo() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("server");
+    let sessions_dir = root.join("sessions");
+    let workspace = root.join("workspace");
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+    let Some((addr, runtime_threads, handle)) =
+        spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+            root,
+            sessions_dir,
+            None,
+            false,
+            workspace,
+            TestServerOverrides {
+                compat_stream_test_hook: Some(hook_tx),
+                ..TestServerOverrides::default()
+            },
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+
+    let client = crate::tls::reqwest_client();
+    let stream_client = client.clone();
+    let request_task = tokio::spawn(async move {
+        let response = stream_client
+            .post(format!("http://{addr}/v1/stream"))
+            .json(&json!({ "prompt": "ask before continuing" }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok::<_, anyhow::Error>(response)
+    });
+
+    let created = tokio::time::timeout(Duration::from_secs(2), hook_rx.recv())
+        .await
+        .context("compatibility stream did not create its interaction thread")?
+        .context("compatibility stream interaction hook closed")?;
+    let (thread_id, resume_created) = match created {
+        CompatStreamTestPoint::ThreadCreated { thread_id, resume } => (thread_id, resume),
+        CompatStreamTestPoint::SubscribedBeforeReplay { .. }
+        | CompatStreamTestPoint::ReplayLoaded { .. } => {
+            bail!("compatibility interaction stream advanced before engine installation")
+        }
+    };
+
+    let mut harness = crate::core::engine::mock_engine_handle();
+    runtime_threads
+        .install_test_engine(&thread_id, harness.handle.clone())
+        .await?;
+    let (submission_tx, submission_rx) = oneshot::channel();
+    let (release_completion, wait_for_completion_release) = oneshot::channel();
+    let engine_task = tokio::spawn(async move {
+        if !matches!(harness.rx_op.recv().await, Some(Op::SendMessage { .. })) {
+            bail!("compatibility interaction engine did not receive a prompt");
+        }
+        harness
+            .tx_event
+            .send(EngineEvent::TurnStarted {
+                turn_id: "mock_compat_input".to_string(),
+                created_at: chrono::Utc::now(),
+                route: None,
+            })
+            .await?;
+        harness
+            .tx_event
+            .send(EngineEvent::UserInputRequired {
+                id: "input_compat".to_string(),
+                request: crate::tools::user_input::UserInputRequest {
+                    questions: vec![crate::tools::user_input::UserInputQuestion {
+                        header: "Continue".to_string(),
+                        id: "choice".to_string(),
+                        question: "Continue the compatibility turn?".to_string(),
+                        options: vec![
+                            crate::tools::user_input::UserInputOption {
+                                label: "Continue".to_string(),
+                                description: "Finish the turn".to_string(),
+                            },
+                            crate::tools::user_input::UserInputOption {
+                                label: "Stop".to_string(),
+                                description: "Cancel the turn".to_string(),
+                            },
+                        ],
+                        allow_free_text: false,
+                        multi_select: false,
+                    }],
+                },
+            })
+            .await?;
+        let submission = harness.recv_user_input_submission().await;
+        let _ = submission_tx.send(submission);
+        wait_for_completion_release
+            .await
+            .context("compatibility interaction test dropped completion release")?;
+        harness
+            .tx_event
+            .send(EngineEvent::MessageStarted { index: 0 })
+            .await?;
+        harness
+            .tx_event
+            .send(EngineEvent::MessageDelta {
+                index: 0,
+                content: "continued".to_string(),
+            })
+            .await?;
+        harness
+            .tx_event
+            .send(EngineEvent::MessageComplete { index: 0 })
+            .await?;
+        harness
+            .tx_event
+            .send(EngineEvent::TurnComplete {
+                usage: Usage::default(),
+                status: TurnOutcomeStatus::Completed,
+                error: None,
+                tool_catalog: None,
+                base_url: None,
+            })
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    });
+    resume_created
+        .send(())
+        .map_err(|_| anyhow::anyhow!("compatibility interaction stream dropped create hook"))?;
+
+    let subscribed = tokio::time::timeout(Duration::from_secs(2), hook_rx.recv())
+        .await
+        .context("compatibility interaction stream did not subscribe")?
+        .context("compatibility stream interaction hook closed")?;
+    let (subscribed_thread_id, turn_id, resume_subscribed) = match subscribed {
+        CompatStreamTestPoint::SubscribedBeforeReplay {
+            thread_id,
+            turn_id,
+            resume,
+        } => (thread_id, turn_id, resume),
+        CompatStreamTestPoint::ThreadCreated { .. }
+        | CompatStreamTestPoint::ReplayLoaded { .. } => {
+            bail!("compatibility interaction stream missed subscribe-before-replay hook")
+        }
+    };
+    assert_eq!(subscribed_thread_id, thread_id);
+    resume_subscribed
+        .send(())
+        .map_err(|_| anyhow::anyhow!("compatibility interaction stream dropped subscribe hook"))?;
+
+    let replay_loaded = tokio::time::timeout(Duration::from_secs(2), hook_rx.recv())
+        .await
+        .context("compatibility interaction stream did not load replay")?
+        .context("compatibility stream interaction hook closed")?;
+    let (replay_thread_id, replay_turn_id, resume_replay) = match replay_loaded {
+        CompatStreamTestPoint::ReplayLoaded {
+            thread_id,
+            turn_id,
+            resume,
+        } => (thread_id, turn_id, resume),
+        CompatStreamTestPoint::ThreadCreated { .. }
+        | CompatStreamTestPoint::SubscribedBeforeReplay { .. } => {
+            bail!("compatibility interaction stream missed replay-loaded hook")
+        }
+    };
+    assert_eq!(replay_thread_id, thread_id);
+    assert_eq!(replay_turn_id, turn_id);
+    resume_replay
+        .send(())
+        .map_err(|_| anyhow::anyhow!("compatibility interaction stream dropped replay hook"))?;
+
+    let response = tokio::time::timeout(Duration::from_secs(2), request_task)
+        .await
+        .context("compatibility interaction request did not return SSE headers")?
+        .context("compatibility interaction request task panicked")??;
+    let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
+    let body_task = tokio::spawn(collect_sse_frames(response, frame_tx));
+
+    let required_payload = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let (event, payload) = frame_rx
+                .recv()
+                .await
+                .context("compatibility interaction stream ended before user input")?;
+            if event == "user_input.required" {
+                break Ok::<_, anyhow::Error>(payload);
+            }
+        }
+    })
+    .await
+    .context("compatibility stream did not expose required user input")??;
+    assert_eq!(required_payload["id"], "input_compat");
+    assert_eq!(required_payload["input_id"], "input_compat");
+    assert_eq!(required_payload["thread_id"], thread_id);
+    assert_eq!(required_payload["turn_id"], turn_id);
+    assert_eq!(required_payload["status"], "required");
+    assert_eq!(required_payload["request"]["questions"][0]["id"], "choice");
+    assert!(required_payload.get("answers").is_none());
+
+    const SECRET_ANSWER: &str = "compat-answer-must-not-be-echoed";
+    let submitted: serde_json::Value = client
+        .post(format!(
+            "http://{addr}/v1/user-input/{thread_id}/input_compat"
+        ))
+        .json(&json!({
+            "answers": [{
+                "id": "choice",
+                "label": "Continue",
+                "value": SECRET_ANSWER,
+            }],
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(submitted["delivered"], true);
+    let (submitted_id, submitted_response) =
+        tokio::time::timeout(Duration::from_secs(2), submission_rx)
+            .await
+            .context("mock engine did not receive compatibility user input")?
+            .context("mock engine dropped compatibility user input")?
+            .context("compatibility user input was canceled instead of submitted")?;
+    assert_eq!(submitted_id, "input_compat");
+    assert_eq!(submitted_response.answers[0].value, SECRET_ANSWER);
+    release_completion
+        .send(())
+        .map_err(|_| anyhow::anyhow!("mock interaction engine dropped completion release"))?;
+
+    let frames = tokio::time::timeout(Duration::from_secs(3), body_task)
+        .await
+        .context("compatibility interaction stream did not terminate")?
+        .context("compatibility interaction body task panicked")??;
+    engine_task
+        .await
+        .context("compatibility interaction engine task panicked")??;
+
+    let answered = frames
+        .iter()
+        .find(|(event, _)| event == "user_input.answered")
+        .context("compatibility stream omitted submitted user-input lifecycle")?;
+    assert_eq!(answered.1["id"], "input_compat");
+    assert_eq!(answered.1["status"], "submitted");
+    assert!(answered.1.get("answers").is_none());
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|(event, _)| event == "user_input.required")
+            .count(),
+        1
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|(event, _)| event == "user_input.answered")
+            .count(),
+        1
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|(event, _)| event == "user_input.canceled")
+    );
+    assert!(frames.iter().any(|(event, _)| event == "turn.completed"));
+    assert_eq!(
+        frames.iter().filter(|(event, _)| event == "done").count(),
+        1
+    );
+    assert!(
+        !serde_json::to_string(&frames)?.contains(SECRET_ANSWER),
+        "submitted answer leaked into compatibility SSE"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
     let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
         return Ok(());
@@ -2856,9 +3173,148 @@ async fn stream_compat_mapping_handles_expected_runtime_events() -> Result<()> {
     assert!(text.contains("event: tool.completed"));
     assert!(text.contains("\"success\":true"));
 
-    let unknown = RuntimeEventRecord {
+    let user_input_required = RuntimeEventRecord {
         schema_version: 1,
         seq: 4,
+        timestamp: chrono::Utc::now(),
+        thread_id: "thr_test".to_string(),
+        turn_id: Some("turn_test".to_string()),
+        item_id: None,
+        event: "user_input.required".to_string(),
+        payload: json!({
+            "id": "input_test",
+            "request": {
+                "questions": [{
+                    "header": "Continue",
+                    "id": "choice",
+                    "question": "Continue?",
+                    "options": [
+                        { "label": "Yes", "description": "Continue" },
+                        { "label": "No", "description": "Stop" }
+                    ]
+                }]
+            },
+            "internal_secret": "required-secret",
+        }),
+    };
+    let mapped = map_compat_stream_event(&user_input_required)
+        .context("missing user_input.required event")?;
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(mapped);
+    };
+    let body =
+        axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("event: user_input.required"));
+    assert!(text.contains("\"input_id\":\"input_test\""));
+    assert!(text.contains("\"status\":\"required\""));
+    assert!(!text.contains("required-secret"));
+
+    let user_input_answered = RuntimeEventRecord {
+        schema_version: 1,
+        seq: 5,
+        timestamp: chrono::Utc::now(),
+        thread_id: "thr_test".to_string(),
+        turn_id: Some("turn_test".to_string()),
+        item_id: None,
+        event: "user_input.answered".to_string(),
+        payload: json!({
+            "input_id": "input_test",
+            "answers": [{ "id": "choice", "value": "answer-secret" }],
+        }),
+    };
+    let mapped = map_compat_stream_event(&user_input_answered)
+        .context("missing user_input.answered event")?;
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(mapped);
+    };
+    let body =
+        axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("event: user_input.answered"));
+    assert!(text.contains("\"status\":\"submitted\""));
+    assert!(!text.contains("answer-secret"));
+    assert!(!text.contains("\"answers\""));
+
+    let user_input_canceled = RuntimeEventRecord {
+        schema_version: 1,
+        seq: 6,
+        timestamp: chrono::Utc::now(),
+        thread_id: "thr_test".to_string(),
+        turn_id: Some("turn_test".to_string()),
+        item_id: None,
+        event: "user_input.canceled".to_string(),
+        payload: json!({ "id": "input_test", "terminal": true }),
+    };
+    let mapped = map_compat_stream_event(&user_input_canceled)
+        .context("missing user_input.canceled event")?;
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(mapped);
+    };
+    let body =
+        axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("event: user_input.canceled"));
+    assert!(text.contains("\"status\":\"canceled\""));
+    assert!(text.contains("\"terminal\":true"));
+
+    let approval_required = RuntimeEventRecord {
+        schema_version: 1,
+        seq: 7,
+        timestamp: chrono::Utc::now(),
+        thread_id: "thr_test".to_string(),
+        turn_id: Some("turn_test".to_string()),
+        item_id: None,
+        event: "approval.required".to_string(),
+        payload: json!({
+            "approval_id": "approval_test",
+            "tool_name": "exec_command",
+            "description": "Run tests",
+            "input": { "token": "approval-secret" },
+        }),
+    };
+    let mapped =
+        map_compat_stream_event(&approval_required).context("missing approval.required event")?;
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(mapped);
+    };
+    let body =
+        axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("event: approval.required"));
+    assert!(text.contains("\"approval_id\":\"approval_test\""));
+    assert!(!text.contains("approval-secret"));
+
+    let approval_decided = RuntimeEventRecord {
+        schema_version: 1,
+        seq: 8,
+        timestamp: chrono::Utc::now(),
+        thread_id: "thr_test".to_string(),
+        turn_id: Some("turn_test".to_string()),
+        item_id: None,
+        event: "approval.decided".to_string(),
+        payload: json!({
+            "approval_id": "approval_test",
+            "decision": "allow",
+            "remember": false,
+            "internal_secret": "approval-decision-secret",
+        }),
+    };
+    let mapped =
+        map_compat_stream_event(&approval_decided).context("missing approval.decided event")?;
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(mapped);
+    };
+    let body =
+        axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("event: approval.decided"));
+    assert!(text.contains("\"decision\":\"allow\""));
+    assert!(!text.contains("approval-decision-secret"));
+
+    let unknown = RuntimeEventRecord {
+        schema_version: 1,
+        seq: 9,
         timestamp: chrono::Utc::now(),
         thread_id: "thr_test".to_string(),
         turn_id: Some("turn_test".to_string()),

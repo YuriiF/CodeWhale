@@ -319,6 +319,55 @@ test("assembles deltas and replaces the live item with its settled receipt", () 
   assert.deepEqual(state.itemOrder, ["item-new", "item-stop"]);
 });
 
+test("projects agent lifecycle receipts live and settles them without a snapshot reload", () => {
+  const state = createThreadState("thread-a");
+  applySnapshot(state, { ...snapshot(), items: [], latest_seq: 1 });
+
+  const agentItem = (status, summary) => ({
+    id: "item-agent",
+    turn_id: "turn-1",
+    kind: "status",
+    status,
+    summary,
+    detail: summary,
+  });
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(2, "agent.spawned", { item: agentItem("in_progress", "Agent spawned") }),
+  );
+  assert.equal(state.items.get("item-agent").status, "in_progress");
+  assert.deepEqual(state.itemOrder, ["item-agent"]);
+
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(3, "agent.progress", { item: agentItem("in_progress", "Agent checking") }),
+  );
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(4, "agent.completed", { item: agentItem("completed", "Agent completed") }),
+  );
+  assert.equal(state.items.get("item-agent").status, "completed");
+  assert.equal(state.items.get("item-agent").summary, "Agent completed");
+  assert.deepEqual(state.itemOrder, ["item-agent"]);
+
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(5, "agent.list", {
+      item: {
+        id: "item-agent-list",
+        turn_id: "turn-1",
+        kind: "status",
+        status: "completed",
+        summary: "Agent list refreshed",
+        detail: "Agent list refreshed",
+      },
+    }),
+  );
+  assert.equal(state.items.get("item-agent-list").status, "completed");
+  assert.deepEqual(state.itemOrder, ["item-agent", "item-agent-list"]);
+  assert.equal(state.latestSeq, 5);
+});
+
 test("tracks approval and user-input attention until each is resolved", () => {
   const state = createThreadState("thread-a");
   applySnapshot(state, snapshot());
