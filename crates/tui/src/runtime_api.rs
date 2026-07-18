@@ -509,13 +509,8 @@ pub async fn run_http_server(
     } else {
         (None, None)
     };
-    let skill_state = SkillStateStore::load_default().unwrap_or_else(|err| {
-        tracing::warn!(
-            "Failed to load skills_state.toml ({}); treating all skills as enabled",
-            err
-        );
-        SkillStateStore::default()
-    });
+    let skill_state = SkillStateStore::load_default()
+        .context("load persistent Skill activation state for Runtime API")?;
     let sub_agent_manager = runtime_api_sub_agent_manager(&workspace, options.workers);
     let state = RuntimeApiState {
         config: Arc::new(parking_lot::RwLock::new(config.clone())),
@@ -1411,7 +1406,10 @@ async fn list_skills(
         mode,
         Some(plugin_registry.as_ref()),
     );
-    let skill_state = state.skill_state.lock().await;
+    let mut skill_state = state.skill_state.lock().await;
+    skill_state
+        .refresh()
+        .map_err(|error| ApiError::internal(format!("refresh skill state: {error}")))?;
     let skills = registry
         .list()
         .iter()

@@ -731,7 +731,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         sub_agent_manager,
         runtime_token,
         skill_state: Arc::new(Mutex::new(
-            SkillStateStore::load_from(root.join("skills_state.toml")).unwrap_or_default(),
+            SkillStateStore::load_from(root.join("skills_state.toml")).unwrap(),
         )),
         auth_required,
         bind_host: "127.0.0.1".to_string(),
