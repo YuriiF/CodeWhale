@@ -21,10 +21,11 @@ thread_local! {
 
 #[cfg(not(test))]
 fn discover_visible_skills(app: &App) -> SkillRegistry {
-    crate::skills::discover_for_workspace_and_dir_with_mode(
+    crate::skills::discover_for_workspace_and_dir_with_mode_and_plugins(
         &app.workspace,
         &app.skills_dir,
         crate::skills::SkillDiscoveryMode::from_codewhale_only(app.skills_scan_codewhale_only),
+        Some(app.plugin_registry.as_ref()),
     )
 }
 
@@ -34,17 +35,19 @@ fn discover_visible_skills(app: &App) -> SkillRegistry {
         crate::skills::SkillDiscoveryMode::from_codewhale_only(app.skills_scan_codewhale_only);
     TEST_HOME_DIR.with(|home| {
         if let Some(home) = home.borrow().as_deref() {
-            crate::skills::discover_for_workspace_and_dir_with_home_and_mode(
+            crate::skills::discover_for_workspace_and_dir_with_home_and_mode_and_plugins(
                 &app.workspace,
                 &app.skills_dir,
                 Some(home),
                 mode,
+                Some(app.plugin_registry.as_ref()),
             )
         } else {
-            crate::skills::discover_for_workspace_and_dir_with_mode(
+            crate::skills::discover_for_workspace_and_dir_with_mode_and_plugins(
                 &app.workspace,
                 &app.skills_dir,
                 mode,
+                Some(app.plugin_registry.as_ref()),
             )
         }
     })
@@ -359,6 +362,18 @@ fn activate_skill(app: &mut App, name: &str) -> CommandResult {
     let registry = discover_visible_skills(app);
 
     if let Some(skill) = registry.get(name) {
+        let plugin_provenance = match &skill.source {
+            SkillSource::Native => None,
+            SkillSource::Plugin { authority, .. } => {
+                if let Err(reason) = crate::plugins::registry::verify_plugin_authority(authority) {
+                    return CommandResult::error(format!(
+                        "Plugin skill '{}' is no longer active: {reason}",
+                        skill.name
+                    ));
+                }
+                Some(authority.as_ref().clone())
+            }
+        };
         let instruction = format!(
             "You are now using a skill. Follow these instructions:\n\n# Skill: {}\n\n{}\n\n---\n\nNow respond to the user's request following the above skill instructions.",
             skill.name, skill.body
@@ -369,6 +384,7 @@ fn activate_skill(app: &mut App, name: &str) -> CommandResult {
         });
 
         app.active_skill = Some(instruction);
+        app.active_skill_provenance = plugin_provenance;
 
         CommandResult::message(format!(
             "Skill '{}' activated.\n\nDescription: {}\n\nType your request and the skill instructions will be applied.",

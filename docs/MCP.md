@@ -36,6 +36,29 @@ Summaries redact commands, args, env, headers, and tokens.
 optional-surface intent (paths, counts, static checks) so wizard and doctor
 stay consistent.
 
+## Plugin-contributed MCP
+
+A reviewed local plugin bundle may contribute MCP servers without creating a
+second transport or approval system. The servers use the same MCP manager,
+tool approval, resource, prompt, timeout, and network-policy paths documented
+here, and appear under namespaced `<plugin>-<server>` identities.
+
+The bundle boundary is intentionally stricter than user-authored `mcp.json`:
+unknown fields and ambiguous transports fail closed; stdio environment values
+must be exact environment-source references; remote literal headers and
+secret-bearing URLs are rejected; declared network hosts must exactly match
+the normalized endpoint host set; and redirects remain on the reviewed origin.
+The plugin review discloses local host-user authority, structural argv,
+environment provenance, endpoint, auth source names, scopes, and tool filters
+without reading or printing secret values.
+
+Trust stages reviewed content but does not enable it. Enablement attaches that
+staged snapshot to the current workspace's MCP pool. Disable, revoke, source or
+stage drift, and cross-process generation changes remove catalog entries,
+cancel in-flight operations, and terminate plugin stdio children. MCP
+subscriptions are not exposed through plugin bundles in v0.9.1. See
+[Plugin bundles](PLUGIN_BUNDLES.md) for the complete lifecycle contract.
+
 ## Bootstrap MCP Config
 
 Create a starter MCP config at your resolved MCP path:

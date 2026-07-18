@@ -1627,6 +1627,7 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         mcp_config_path: config.mcp_config_path(),
         skills_dir: app.skills_dir.clone(),
         skills_scan_codewhale_only: app.skills_scan_codewhale_only,
+        plugin_registry: Some(std::sync::Arc::clone(&app.plugin_registry)),
         instructions: configured_instruction_sources(config),
         project_context_pack_enabled: config.project_context_pack_enabled(),
         translation_enabled: app.translation_enabled,
@@ -1756,6 +1757,7 @@ fn build_app_system_prompt_with_goal(
             show_thinking: app.show_thinking,
             verbosity: app.verbosity.as_deref(),
             skills_scan_codewhale_only: app.skills_scan_codewhale_only,
+            plugin_registry: Some(app.plugin_registry.as_ref()),
         },
     )
 }
@@ -3177,7 +3179,9 @@ async fn run_event_loop(
                             app.set_model_selection(model);
                         }
                         app.update_model_compaction_budget();
-                        app.workspace = workspace;
+                        if app.workspace != workspace {
+                            apply_workspace_runtime_state(app, config, workspace);
+                        }
                         if (app.is_loading || app.is_compacting || app.is_purging)
                             && let Ok(manager) = SessionManager::default_location()
                         {
@@ -6704,6 +6708,7 @@ fn queued_ui_to_session(msg: &QueuedMessage) -> QueuedSessionMessage {
     QueuedSessionMessage {
         display: msg.display.clone(),
         skill_instruction: msg.skill_instruction.clone(),
+        skill_provenance: msg.skill_provenance.clone(),
     }
 }
 
@@ -6711,6 +6716,7 @@ fn queued_session_to_ui(msg: QueuedSessionMessage) -> QueuedMessage {
     QueuedMessage {
         display: msg.display,
         skill_instruction: msg.skill_instruction,
+        skill_provenance: msg.skill_provenance,
     }
 }
 
@@ -7530,7 +7536,8 @@ fn replace_matching_assistant_text(
 
 fn build_queued_message(app: &mut App, input: String) -> QueuedMessage {
     let skill_instruction = app.active_skill.take();
-    QueuedMessage::new(input, skill_instruction)
+    let skill_provenance = app.active_skill_provenance.take();
+    QueuedMessage::new(input, skill_instruction).with_skill_provenance(skill_provenance)
 }
 
 const INITIAL_PROMPT_DEFERRED_STATUS: &str = "Initial prompt ready; complete setup to send it";
@@ -7682,7 +7689,13 @@ fn queued_message_content_for_app(
     app: &App,
     message: &QueuedMessage,
     cwd: Option<PathBuf>,
-) -> String {
+) -> Result<String> {
+    if let Some(authority) = message.skill_provenance.as_ref() {
+        if authority.workspace != app.workspace {
+            anyhow::bail!("Queued plugin skill belongs to a different workspace and was denied");
+        }
+        crate::plugins::registry::verify_plugin_authority(authority).map_err(anyhow::Error::msg)?;
+    }
     // Pass the process CWD explicitly so the resolver's two-pass logic can
     // honor the user's launch directory when it differs from `--workspace`
     // (issue #101 — file mentions silently routing to the wrong root).
@@ -7692,9 +7705,11 @@ fn queued_message_content_for_app(
         cwd,
     );
     if let Some(skill_instruction) = message.skill_instruction.as_ref() {
-        format!("{skill_instruction}\n\n---\n\nUser request: {user_request}")
+        Ok(format!(
+            "{skill_instruction}\n\n---\n\nUser request: {user_request}"
+        ))
     } else {
-        user_request
+        Ok(user_request)
     }
 }
 
@@ -7973,7 +7988,7 @@ async fn dispatch_user_message(
         &app.workspace,
         cwd.clone(),
     );
-    let mut content = queued_message_content_for_app(app, &message, cwd);
+    let mut content = queued_message_content_for_app(app, &message, cwd)?;
     if let Some(note) = paused_dispatch.note() {
         content.push_str(note);
     }
@@ -9281,6 +9296,23 @@ async fn apply_command_result(
                 config.approval_policy = policy;
                 sync_mode_update(app, engine_handle).await;
             }
+            AppAction::PluginRegistryChanged => {
+                let _ = engine_handle.send(Op::Shutdown).await;
+                *engine_handle = spawn_engine(build_engine_config(app, config), config);
+                if !app.api_messages.is_empty() {
+                    let _ = engine_handle
+                        .send(Op::SyncSession {
+                            session_id: app.current_session_id.clone(),
+                            messages: app.api_messages.clone(),
+                            system_prompt: app.system_prompt.clone(),
+                            system_prompt_override: false,
+                            model: app.model.clone(),
+                            workspace: app.workspace.clone(),
+                            mode: app.mode,
+                        })
+                        .await;
+                }
+            }
             AppAction::SendMessage(content) => {
                 let queued = build_queued_message(app, content);
                 submit_or_steer_message(app, config, engine_handle, queued).await?;
@@ -9912,6 +9944,9 @@ fn spawn_external_url_command(mut command: Command) -> Result<()> {
 
 fn apply_workspace_runtime_state(app: &mut App, config: &Config, workspace: PathBuf) {
     app.workspace = workspace.clone();
+    app.plugin_registry = crate::plugins::registry_for_workspace(&workspace);
+    app.active_skill = None;
+    app.active_skill_provenance = None;
     app.hooks = HookExecutor::new(
         crate::hooks::HooksConfig::load_with_project(config.hooks_config(), &workspace),
         workspace.clone(),
@@ -10345,7 +10380,7 @@ async fn steer_user_message(
         &app.workspace,
         cwd.clone(),
     );
-    let mut content = queued_message_content_for_app(app, &message, cwd);
+    let mut content = queued_message_content_for_app(app, &message, cwd)?;
     if let Some(note) = paused_note.as_deref() {
         content.push_str(note);
     }
@@ -10524,6 +10559,7 @@ fn restore_failed_immediate_submit(app: &mut App, message: QueuedMessage, error:
     app.input = message.display;
     app.cursor_position = app.input.chars().count();
     app.active_skill = message.skill_instruction;
+    app.active_skill_provenance = message.skill_provenance;
     let status = tr(app.ui_locale, MessageId::ComposerDispatchFailedRestored)
         .replace("{error}", &error.to_string());
     app.status_message = Some(status.clone());
@@ -10545,14 +10581,19 @@ fn merge_pending_steers(app: &mut App) -> Option<QueuedMessage> {
         return drained.into_iter().next();
     }
     let mut skill_instruction: Option<String> = None;
+    let mut skill_provenance = None;
     let mut bodies: Vec<String> = Vec::with_capacity(drained.len());
     for msg in drained {
         if skill_instruction.is_none() {
             skill_instruction = msg.skill_instruction;
+            skill_provenance = msg.skill_provenance;
         }
         bodies.push(msg.display);
     }
-    Some(QueuedMessage::new(bodies.join("\n\n"), skill_instruction))
+    Some(
+        QueuedMessage::new(bodies.join("\n\n"), skill_instruction)
+            .with_skill_provenance(skill_provenance),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

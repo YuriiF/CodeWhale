@@ -1409,7 +1409,6 @@ async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
     // and every other runtime surface feed Skills and MCP from the same trust
     // decision (#3916, #4399). Discovery never enables, trusts, executes, or
     // persists a bundle.
-    initialize_plugin_registry(&cli);
 
     // Handle subcommands first
     if let Some(command) = command {
@@ -2770,7 +2769,10 @@ fn plugins_readme_template() -> &'static str {
      ```\n\n\
      Run `/plugin validate`, `/plugin show <name>`, then `/plugin enable <name>`.\n\
      Enablement opens a content- and capability-bound trust review;\n\
-     confirm the displayed `/plugin trust` command, then enable the bundle.\n\n\
+     confirm the displayed `/plugin trust` command to create an owner-only,\n\
+     content-addressed runtime snapshot, then enable the bundle. Remote MCP\n\
+     authentication must name environment sources; never store secret values\n\
+     in `plugin.toml`.\n\n\
      v0.9.1 activates only declarative Skills and MCP servers through their\n\
      existing engines. Commands, agents, hooks, LSP, native extensions,\n\
      filesystem grants, and lifecycle mutation are inventoried but inactive.\n\
@@ -6248,10 +6250,6 @@ fn resolve_workspace(cli: &Cli) -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
-fn initialize_plugin_registry(cli: &Cli) {
-    crate::plugins::init_registry(&resolve_workspace(cli));
-}
-
 fn load_config_from_cli(cli: &Cli) -> Result<Config> {
     load_config_from_cli_with_effective_profile(cli).map(|(config, _)| config)
 }
@@ -9475,6 +9473,7 @@ async fn run_exec_agent(
         model: effective_model.clone(),
         active_route_limits,
         workspace: workspace.clone(),
+        plugin_registry: Some(crate::plugins::registry_for_workspace(&workspace)),
         allow_shell: auto_approve || execution_config.allow_shell(),
         trust_mode,
         notes_path: execution_config.notes_path(),
@@ -11272,7 +11271,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
-    fn plugin_registry_initializes_for_plain_resume_fork_exec_and_serve_routes() {
+    fn plugin_registry_discovery_is_route_independent_and_read_only() {
         let _env_lock = crate::test_support::lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
@@ -11295,11 +11294,10 @@ mod terminal_mode_tests {
             ];
             args.extend(route.into_iter().map(str::to_string));
             let cli = Cli::try_parse_from(args).expect("route should parse");
-            initialize_plugin_registry(&cli);
-            assert_eq!(
-                crate::plugins::registry_workspace().as_deref(),
-                Some(workspace.as_path())
+            let registry = crate::plugins::registry_for_workspace(
+                cli.workspace.as_deref().unwrap_or(workspace.as_path()),
             );
+            assert_eq!(registry.workspace(), workspace.as_path());
             assert!(
                 !codewhale_home.join("plugins/state.json").exists(),
                 "startup discovery must remain read-only"

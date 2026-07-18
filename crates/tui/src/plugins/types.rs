@@ -67,6 +67,27 @@ impl PluginId {
     }
 }
 
+/// Persistable proof of the exact reviewed plugin authority attached to a
+/// Skill or MCP server. Runtime contexts keep this receipt instead of a
+/// pointer to mutable process-global discovery state, and revalidate it at
+/// every side-effect boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginAuthority {
+    pub plugin_id: PluginId,
+    pub plugin_name: String,
+    pub workspace: PathBuf,
+    pub state_path: PathBuf,
+    pub source_manifest: PathBuf,
+    pub staged_manifest: PathBuf,
+    pub content_hash: String,
+    pub capability_hash: String,
+    /// Monotonic generation of this plugin's persisted authority. Any trust,
+    /// enablement, disablement, or revocation transition invalidates receipts
+    /// held by another process immediately, even when hashes are unchanged.
+    pub state_generation: u64,
+}
+
 impl fmt::Display for PluginId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -144,6 +165,10 @@ pub struct LoadedPlugin {
     pub manifest: PluginManifest,
     pub base_path: PathBuf,
     pub canonical_root: PathBuf,
+    /// Codewhale-owned, content-addressed copy used for active execution.
+    /// `None` means the reviewed bundle has not been staged safely and cannot
+    /// become active even if an older state file says it was enabled.
+    pub staged_root: Option<PathBuf>,
     pub scope: PluginScope,
     pub origin: PluginOrigin,
     pub enabled: bool,
@@ -153,6 +178,7 @@ pub struct LoadedPlugin {
     pub components: ResolvedPluginComponents,
     pub content_hash: String,
     pub capability_hash: String,
+    pub state_generation: u64,
     pub skill_snapshots: Vec<PluginSkillSnapshot>,
     pub diagnostics: Vec<PluginDiagnostic>,
 }
@@ -172,12 +198,29 @@ impl LoadedPlugin {
     pub fn active(&self) -> bool {
         self.enabled
             && self.trusted()
+            && self.staged_root.is_some()
             && self.applicable
             && !self.inventory.has_unsupported_capabilities()
             && !self
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.level == PluginDiagnosticLevel::Error)
+    }
+
+    #[must_use]
+    pub fn authority(&self, state_path: PathBuf, workspace: PathBuf) -> Option<PluginAuthority> {
+        let staged_root = self.staged_root.as_ref()?;
+        Some(PluginAuthority {
+            plugin_id: self.id.clone(),
+            plugin_name: self.name().to_string(),
+            workspace,
+            state_path,
+            source_manifest: self.canonical_root.join("plugin.toml"),
+            staged_manifest: staged_root.join("plugin.toml"),
+            content_hash: self.content_hash.clone(),
+            capability_hash: self.capability_hash.clone(),
+            state_generation: self.state_generation,
+        })
     }
 
     #[must_use]
@@ -188,6 +231,8 @@ impl LoadedPlugin {
             "disabled"
         } else if !self.trusted() {
             "enabled-untrusted"
+        } else if self.staged_root.is_none() {
+            "unstaged"
         } else if !self.applicable {
             "inapplicable"
         } else if self.inventory.has_unsupported_capabilities() {

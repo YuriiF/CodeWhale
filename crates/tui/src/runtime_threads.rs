@@ -4917,6 +4917,7 @@ impl RuntimeThreadManager {
                 model: route_model.clone(),
                 active_route_limits: route_limits,
                 workspace: thread.workspace.clone(),
+                plugin_registry: Some(crate::plugins::registry_for_workspace(&thread.workspace)),
                 allow_shell: thread.allow_shell,
                 trust_mode: thread.trust_mode,
                 notes_path: cfg.notes_path(),

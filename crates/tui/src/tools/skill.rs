@@ -28,8 +28,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::skills::{
-    Skill, SkillDiscoveryMode, SkillSource, discover_for_workspace_and_dir_with_mode,
-    discover_in_workspace_with_mode, skill_directories_for_workspace_and_dir,
+    Skill, SkillDiscoveryMode, SkillSource, discover_for_workspace_and_dir_with_mode_and_plugins,
+    discover_in_workspace_with_mode_and_plugins, skill_directories_for_workspace_and_dir,
     skills_directories_for_mode,
 };
 
@@ -98,9 +98,18 @@ impl ToolSpec for LoadSkillTool {
         let discovery_mode =
             SkillDiscoveryMode::from_codewhale_only(context.skills_scan_codewhale_only);
         let registry = if let Some(skills_dir) = context.skills_dir.as_deref() {
-            discover_for_workspace_and_dir_with_mode(&context.workspace, skills_dir, discovery_mode)
+            discover_for_workspace_and_dir_with_mode_and_plugins(
+                &context.workspace,
+                skills_dir,
+                discovery_mode,
+                context.plugin_registry.as_deref(),
+            )
         } else {
-            discover_in_workspace_with_mode(&context.workspace, discovery_mode)
+            discover_in_workspace_with_mode_and_plugins(
+                &context.workspace,
+                discovery_mode,
+                context.plugin_registry.as_deref(),
+            )
         };
         let Some(skill) = registry.get(name) else {
             let available: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
@@ -141,7 +150,7 @@ impl ToolSpec for LoadSkillTool {
             return Err(ToolError::execution_failed(hint));
         };
 
-        ensure_reviewed_plugin_skill_is_current(skill)?;
+        ensure_reviewed_plugin_skill_is_current(skill, &context.workspace)?;
         let body = format_skill_body(skill);
         let (skill_path, skill_source) = match &skill.source {
             SkillSource::Native => (Some(skill.path.display().to_string()), "native".to_string()),
@@ -166,49 +175,32 @@ impl ToolSpec for LoadSkillTool {
     }
 }
 
-fn ensure_reviewed_plugin_skill_is_current(skill: &Skill) -> Result<(), ToolError> {
+fn ensure_reviewed_plugin_skill_is_current(
+    skill: &Skill,
+    workspace: &std::path::Path,
+) -> Result<(), ToolError> {
     let SkillSource::Plugin {
-        plugin_id,
         plugin_name,
-        plugin_root,
+        authority,
+        ..
     } = &skill.source
     else {
         return Ok(());
     };
 
-    let Some(plugin) =
-        crate::plugins::try_with_registry(|registry| registry.get(plugin_id).cloned()).flatten()
-    else {
+    if authority.workspace != workspace {
         return Err(ToolError::execution_failed(format!(
-            "Plugin skill `{}` is no longer backed by the reviewed `{plugin_name}` registry snapshot. Run `/plugin reload`, review and trust the bundle again, then enable it before retrying",
-            skill.name
-        )));
-    };
-    if !plugin.active() || plugin.canonical_root != *plugin_root {
-        return Err(ToolError::execution_failed(format!(
-            "Plugin skill `{}` is no longer active under its reviewed bundle identity. Run `/plugin reload`, review and trust `{plugin_name}` again, then enable it before retrying",
+            "Plugin skill `{}` belongs to a different workspace and was denied",
             skill.name
         )));
     }
 
-    let current = crate::plugins::manifest::PluginManifest::validate_from_path(
-        &plugin.canonical_root.join("plugin.toml"),
-    )
-    .map_err(|_| {
+    crate::plugins::registry::verify_plugin_authority(authority).map_err(|reason| {
         ToolError::execution_failed(format!(
-            "Plugin skill `{}` was denied because `{plugin_name}` could not be revalidated. Run `/plugin reload`, inspect `/plugin show {plugin_name}`, then repeat the displayed trust command and enable it before retrying",
+            "Plugin skill `{}` was denied: {reason}. Run `/plugin reload`, inspect `/plugin show {plugin_name}`, then repeat the displayed trust command and enable it before retrying",
             skill.name
         ))
-    })?;
-    if current.content_hash != plugin.content_hash
-        || current.capability_hash != plugin.capability_hash
-    {
-        return Err(ToolError::execution_failed(format!(
-            "Plugin skill `{}` was denied because `{plugin_name}` changed after review. Run `/plugin reload`, inspect `/plugin show {plugin_name}`, then repeat the displayed trust command and enable it before retrying",
-            skill.name
-        )));
-    }
-    Ok(())
+    })
 }
 
 /// Render the skill body the model will see. Includes the description
@@ -362,7 +354,17 @@ mod tests {
             source: SkillSource::Plugin {
                 plugin_id: "workspace/123/demo".to_string(),
                 plugin_name: "demo".to_string(),
-                plugin_root: tmp.path().to_path_buf(),
+                authority: Box::new(crate::plugins::types::PluginAuthority {
+                    plugin_id: crate::plugins::types::PluginId("workspace/123/demo".to_string()),
+                    plugin_name: "demo".to_string(),
+                    workspace: tmp.path().to_path_buf(),
+                    state_path: tmp.path().join("state.json"),
+                    source_manifest: tmp.path().join("plugin.toml"),
+                    staged_manifest: tmp.path().join("staged/plugin.toml"),
+                    content_hash: "0".repeat(64),
+                    capability_hash: "0".repeat(64),
+                    state_generation: 0,
+                }),
             },
         };
 
@@ -394,21 +396,24 @@ mod tests {
         .unwrap();
         fs::write(skill_dir.join("companion.txt"), "reviewed companion").unwrap();
 
-        crate::plugins::init_registry(tmp.path());
-        crate::plugins::with_registry(|registry| {
-            registry.trust("demo").unwrap();
-            registry.enable("demo").unwrap();
-        })
-        .unwrap();
-        let registry = crate::skills::discover_in_workspace_with_mode(
+        let mut plugins = crate::plugins::registry_for_workspace(tmp.path());
+        std::sync::Arc::make_mut(&mut plugins)
+            .trust("demo")
+            .unwrap();
+        std::sync::Arc::make_mut(&mut plugins)
+            .enable("demo")
+            .unwrap();
+        let registry = crate::skills::discover_in_workspace_with_mode_and_plugins(
             tmp.path(),
             SkillDiscoveryMode::CodeWhaleOnly,
+            Some(plugins.as_ref()),
         );
         let skill = registry.get("demo:hello").expect("active plugin skill");
-        ensure_reviewed_plugin_skill_is_current(skill).expect("stable reviewed snapshot");
+        ensure_reviewed_plugin_skill_is_current(skill, tmp.path())
+            .expect("stable reviewed snapshot");
 
         fs::write(skill_dir.join("companion.txt"), "changed after review").unwrap();
-        let error = ensure_reviewed_plugin_skill_is_current(skill)
+        let error = ensure_reviewed_plugin_skill_is_current(skill, tmp.path())
             .expect_err("bundle drift must deny the reviewed skill snapshot");
         assert!(error.to_string().contains("changed after review"));
     }

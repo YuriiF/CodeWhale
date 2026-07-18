@@ -91,7 +91,7 @@ pub enum SkillSource {
     Plugin {
         plugin_id: String,
         plugin_name: String,
-        plugin_root: PathBuf,
+        authority: Box<crate::plugins::types::PluginAuthority>,
     },
 }
 
@@ -731,7 +731,16 @@ pub fn discover_in_workspace_with_mode(
     workspace: &Path,
     mode: SkillDiscoveryMode,
 ) -> SkillRegistry {
-    discover_from_directories(skills_directories_for_mode(workspace, mode))
+    discover_in_workspace_with_mode_and_plugins(workspace, mode, None)
+}
+
+#[must_use]
+pub fn discover_in_workspace_with_mode_and_plugins(
+    workspace: &Path,
+    mode: SkillDiscoveryMode,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> SkillRegistry {
+    discover_from_directories_with_plugins(skills_directories_for_mode(workspace, mode), plugins)
 }
 
 /// Discover skills from the workspace search set plus the configured install
@@ -751,8 +760,18 @@ pub fn discover_for_workspace_and_dir_with_mode(
     skills_dir: &Path,
     mode: SkillDiscoveryMode,
 ) -> SkillRegistry {
+    discover_for_workspace_and_dir_with_mode_and_plugins(workspace, skills_dir, mode, None)
+}
+
+#[must_use]
+pub fn discover_for_workspace_and_dir_with_mode_and_plugins(
+    workspace: &Path,
+    skills_dir: &Path,
+    mode: SkillDiscoveryMode,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> SkillRegistry {
     let dirs = skill_directories_for_workspace_and_dir(workspace, skills_dir, mode);
-    discover_from_directories(dirs)
+    discover_from_directories_with_plugins(dirs, plugins)
 }
 
 #[must_use]
@@ -793,6 +812,13 @@ fn paths_refer_to_same_dir(left: &Path, right: &Path) -> bool {
 }
 
 pub(crate) fn discover_from_directories(dirs: impl IntoIterator<Item = PathBuf>) -> SkillRegistry {
+    discover_from_directories_with_plugins(dirs, None)
+}
+
+pub(crate) fn discover_from_directories_with_plugins(
+    dirs: impl IntoIterator<Item = PathBuf>,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> SkillRegistry {
     let mut merged = SkillRegistry::default();
     for dir in dirs {
         let registry = SkillRegistry::discover(&dir);
@@ -812,30 +838,49 @@ pub(crate) fn discover_from_directories(dirs: impl IntoIterator<Item = PathBuf>)
             merged.warnings.push(warning);
         }
     }
-    merge_active_plugin_skills(&mut merged);
+    if let Some(plugins) = plugins {
+        merge_active_plugin_skills(&mut merged, plugins);
+    }
     merged
 }
 
-fn merge_active_plugin_skills(registry: &mut SkillRegistry) {
-    let plugins = crate::plugins::try_with_registry(|plugins| {
-        plugins.list().into_iter().cloned().collect::<Vec<_>>()
-    })
-    .unwrap_or_default();
+fn merge_active_plugin_skills(
+    registry: &mut SkillRegistry,
+    plugins: &crate::plugins::PluginRegistry,
+) {
+    let Some(state_path) = plugins.state_path().map(Path::to_path_buf) else {
+        return;
+    };
+    let plugins = plugins
+        .list()
+        .into_iter()
+        .filter_map(|plugin| {
+            plugin
+                .authority(state_path.clone(), plugins.workspace().to_path_buf())
+                .map(|authority| (plugin.clone(), authority))
+        })
+        .collect::<Vec<_>>();
     merge_plugin_skills_from_plugins(registry, plugins);
 }
 
 fn merge_plugin_skills_from_plugins(
     registry: &mut SkillRegistry,
-    plugins: impl IntoIterator<Item = crate::plugins::types::LoadedPlugin>,
+    plugins: impl IntoIterator<
+        Item = (
+            crate::plugins::types::LoadedPlugin,
+            crate::plugins::types::PluginAuthority,
+        ),
+    >,
 ) {
-    for plugin in plugins {
+    for (plugin, authority) in plugins {
         // Keep the adapter independently fail-closed for headless callers.
-        if !plugin.active() {
+        if !plugin.active()
+            || crate::plugins::registry::verify_plugin_authority(&authority).is_err()
+        {
             continue;
         }
         let plugin_id = plugin.id.to_string();
         let plugin_name = plugin.name().to_string();
-        let plugin_root = plugin.canonical_root.clone();
         for snapshot in plugin.skill_snapshots {
             let qualified_name = format!("{plugin_name}:{}", snapshot.name);
             if let Some(existing) = registry
@@ -859,7 +904,7 @@ fn merge_plugin_skills_from_plugins(
                 source: SkillSource::Plugin {
                     plugin_id: plugin_id.clone(),
                     plugin_name: plugin_name.clone(),
-                    plugin_root: plugin_root.clone(),
+                    authority: Box::new(authority.clone()),
                 },
             });
         }
@@ -887,9 +932,22 @@ pub(crate) fn discover_for_workspace_and_dir_with_home_and_mode(
     home_dir: Option<&Path>,
     mode: SkillDiscoveryMode,
 ) -> SkillRegistry {
+    discover_for_workspace_and_dir_with_home_and_mode_and_plugins(
+        workspace, skills_dir, home_dir, mode, None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn discover_for_workspace_and_dir_with_home_and_mode_and_plugins(
+    workspace: &Path,
+    skills_dir: &Path,
+    home_dir: Option<&Path>,
+    mode: SkillDiscoveryMode,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> SkillRegistry {
     let mut dirs = skills_directories_with_home_and_mode(workspace, home_dir, mode);
     insert_configured_skills_dir(&mut dirs, workspace, skills_dir);
-    discover_from_directories(dirs)
+    discover_from_directories_with_plugins(dirs, plugins)
 }
 
 /// Render the system-prompt skills block from every workspace
@@ -903,12 +961,13 @@ pub fn render_available_skills_context_for_workspace(workspace: &Path) -> Option
 }
 
 #[must_use]
-pub fn render_available_skills_context_for_workspace_with_mode(
+pub fn render_available_skills_context_for_workspace_with_mode_and_plugins(
     workspace: &Path,
     mode: SkillDiscoveryMode,
     locale: &str,
+    plugins: Option<&crate::plugins::PluginRegistry>,
 ) -> Option<String> {
-    let registry = discover_in_workspace_with_mode(workspace, mode);
+    let registry = discover_in_workspace_with_mode_and_plugins(workspace, mode, plugins);
     render_skills_block(&registry, locale)
 }
 
@@ -948,7 +1007,21 @@ pub fn render_available_skills_context_for_workspace_and_dir_with_mode(
     mode: SkillDiscoveryMode,
     locale: &str,
 ) -> Option<String> {
-    let registry = discover_for_workspace_and_dir_with_mode(workspace, skills_dir, mode);
+    let registry =
+        discover_for_workspace_and_dir_with_mode_and_plugins(workspace, skills_dir, mode, None);
+    render_skills_block(&registry, locale)
+}
+
+#[must_use]
+pub fn render_available_skills_context_for_workspace_and_dir_with_mode_and_plugins(
+    workspace: &Path,
+    skills_dir: &Path,
+    mode: SkillDiscoveryMode,
+    locale: &str,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> Option<String> {
+    let registry =
+        discover_for_workspace_and_dir_with_mode_and_plugins(workspace, skills_dir, mode, plugins);
     render_skills_block(&registry, locale)
 }
 
@@ -2307,7 +2380,7 @@ body";
     #[test]
     fn plugin_skills_are_qualified_and_denied_until_trusted_and_enabled() {
         let tmp = TempDir::new().unwrap();
-        let plugin_root = tmp.path().join("demo");
+        let plugin_root = tmp.path().join("plugins/demo");
         std::fs::create_dir_all(plugin_root.join("skills/hello-world")).unwrap();
         std::fs::write(
             plugin_root.join("plugin.toml"),
@@ -2319,23 +2392,25 @@ body";
             "---\nname: hello-world\ndescription: hello\n---\nbody\n",
         )
         .unwrap();
-        let disabled =
-            crate::plugins::discovery::load_plugin_for_test(&plugin_root.join("plugin.toml"))
-                .unwrap();
+        let config = crate::plugins::discovery::DiscoveryConfig {
+            workspace: tmp.path().join("workspace"),
+            user_plugins_dir: tmp.path().join("plugins"),
+            workspace_plugins_dir: tmp.path().join("workspace-plugins"),
+            builtin_plugin_dirs: Vec::new(),
+            state_path: tmp.path().join("plugin-state.json"),
+        };
+        let mut plugins = crate::plugins::discovery::discover_with_config(&config);
 
         let mut registry = super::SkillRegistry::default();
-        super::merge_plugin_skills_from_plugins(&mut registry, vec![disabled.clone()]);
+        super::merge_active_plugin_skills(&mut registry, &plugins);
         assert!(registry.get("demo:hello-world").is_none());
 
-        let mut untrusted = disabled.clone();
-        untrusted.enabled = true;
-        super::merge_plugin_skills_from_plugins(&mut registry, vec![untrusted]);
+        plugins.trust("demo").unwrap();
+        super::merge_active_plugin_skills(&mut registry, &plugins);
         assert!(registry.get("demo:hello-world").is_none());
 
-        let mut active = disabled;
-        active.enabled = true;
-        active.trust_status = crate::plugins::types::PluginTrustStatus::Trusted;
-        super::merge_plugin_skills_from_plugins(&mut registry, vec![active]);
+        plugins.enable("demo").unwrap();
+        super::merge_active_plugin_skills(&mut registry, &plugins);
         let skill = registry
             .get("Demo:Hello_World")
             .expect("qualified lookup should normalize each namespace segment");
@@ -2350,6 +2425,14 @@ body";
         assert!(
             !rendered.contains(&plugin_root.display().to_string()),
             "model prompt must not expose mutable plugin files after snapshot review"
+        );
+
+        std::fs::remove_file(tmp.path().join("plugin-state.json.lock")).unwrap();
+        let mut denied = super::SkillRegistry::default();
+        super::merge_active_plugin_skills(&mut denied, &plugins);
+        assert!(
+            denied.get("demo:hello-world").is_none(),
+            "a missing authority lock must remove plugin instructions from the prompt catalogue"
         );
     }
 }

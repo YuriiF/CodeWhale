@@ -58,6 +58,7 @@ fn review(app: &mut App, args: Option<&str>) -> CommandResult {
         content: format!("Activated skill: {}\n\n{}", skill.name, skill.description),
     });
     app.active_skill = Some(instruction);
+    app.active_skill_provenance = None;
 
     CommandResult::action(AppAction::SendMessage(target.to_string()))
 }

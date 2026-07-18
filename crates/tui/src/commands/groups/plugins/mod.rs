@@ -17,7 +17,7 @@ use crate::localization::{MessageId, tr};
 use crate::plugins::types::{LoadedPlugin, PluginDiagnosticLevel};
 use crate::tools::plugin::{PluginMetadata, scan_plugin_dir};
 use crate::tools::spec::ApprovalRequirement;
-use crate::tui::app::App;
+use crate::tui::app::{App, AppAction};
 
 pub struct PluginsCommands;
 
@@ -65,20 +65,21 @@ fn plugins(app: &mut App, arg: Option<&str>) -> CommandResult {
         ["enable", selector] => mutate_bundle(app, selector, Mutation::Enable),
         ["disable", selector] => mutate_bundle(app, selector, Mutation::Disable),
         ["revoke", selector] => mutate_bundle(app, selector, Mutation::Revoke),
-        ["reload"] => match crate::plugins::reload_registry(&app.workspace) {
-            Ok(count) => CommandResult::message(
+        ["reload"] => {
+            app.plugin_registry = crate::plugins::registry_for_workspace(&app.workspace);
+            app.refresh_skill_cache();
+            let count = app.plugin_registry.len();
+            CommandResult::with_message_and_action(
                 tr(app.ui_locale, MessageId::CmdPluginBundleReloaded)
                     .replace("{count}", &count.to_string())
                     .replace("{workspace}", &app.workspace.display().to_string()),
-            ),
-            Err(error) => action_error(app, &error),
-        },
+                AppAction::PluginRegistryChanged,
+            )
+        }
         ["tools"] => legacy_tools(app, None),
         ["tools", name] => legacy_tools(app, Some(name)),
         [selector] => {
-            if crate::plugins::try_with_registry(|registry| registry.get(selector).is_some())
-                .unwrap_or(false)
-            {
+            if app.plugin_registry.get(selector).is_some() {
                 show_bundle(app, selector)
             } else {
                 // Preserve `/plugin <script-tool>` compatibility while making
@@ -91,7 +92,8 @@ fn plugins(app: &mut App, arg: Option<&str>) -> CommandResult {
 }
 
 fn list_bundles_and_legacy_tools(app: &App) -> CommandResult {
-    let mut output = crate::plugins::try_with_registry(|registry| {
+    let mut output = {
+        let registry = app.plugin_registry.as_ref();
         let plugins = registry.list();
         let mut output = if plugins.is_empty() {
             tr(app.ui_locale, MessageId::CmdPluginBundleNoneFound).into_owned()
@@ -103,20 +105,19 @@ fn list_bundles_and_legacy_tools(app: &App) -> CommandResult {
                 let _ = writeln!(
                     output,
                     "• {} — {}\n  {} · {} · {}\n  {}",
-                    plugin.name(),
+                    escape_review_text(plugin.name()),
                     plugin.state_label(),
                     plugin.scope,
                     plugin.trust_status.as_str(),
                     plugin.inventory.summary(),
-                    plugin.id
+                    escape_review_text(plugin.id.as_str())
                 );
             }
             output
         };
         append_diagnostics(app, &mut output, registry.diagnostics());
         output
-    })
-    .unwrap_or_else(|| tr(app.ui_locale, MessageId::CmdPluginBundleNoneFound).into_owned());
+    };
 
     if let Some((dir, tools)) = scan_legacy_tools(app) {
         output.push('\n');
@@ -130,9 +131,9 @@ fn list_bundles_and_legacy_tools(app: &App) -> CommandResult {
             let _ = writeln!(
                 output,
                 "• {} — {}\n  {}",
-                metadata.name,
-                metadata.description,
-                path.display()
+                escape_review_text(&metadata.name),
+                escape_review_text(&metadata.description),
+                escape_review_path(&path)
             );
         }
     }
@@ -141,9 +142,7 @@ fn list_bundles_and_legacy_tools(app: &App) -> CommandResult {
 }
 
 fn show_bundle(app: &App, selector: &str) -> CommandResult {
-    let Some(plugin) =
-        crate::plugins::try_with_registry(|registry| registry.get(selector).cloned()).flatten()
-    else {
+    let Some(plugin) = app.plugin_registry.get(selector).cloned() else {
         return CommandResult::error(
             tr(app.ui_locale, MessageId::CmdPluginBundleNotFound).replace("{name}", selector),
         );
@@ -152,9 +151,7 @@ fn show_bundle(app: &App, selector: &str) -> CommandResult {
 }
 
 fn review_bundle(app: &App, selector: &str) -> CommandResult {
-    let Some(plugin) =
-        crate::plugins::try_with_registry(|registry| registry.get(selector).cloned()).flatten()
-    else {
+    let Some(plugin) = app.plugin_registry.get(selector).cloned() else {
         return CommandResult::error(
             tr(app.ui_locale, MessageId::CmdPluginBundleNotFound).replace("{name}", selector),
         );
@@ -170,7 +167,8 @@ fn review_bundle(app: &App, selector: &str) -> CommandResult {
 }
 
 fn validate_bundles(app: &App, selector: Option<&str>) -> CommandResult {
-    let Some((plugins, diagnostics, clean)) = crate::plugins::try_with_registry(|registry| {
+    let (plugins, diagnostics, clean) = {
+        let registry = app.plugin_registry.as_ref();
         let plugins: Vec<LoadedPlugin> = match selector {
             Some(selector) => registry.get(selector).cloned().into_iter().collect(),
             None => registry.list().into_iter().cloned().collect(),
@@ -180,7 +178,8 @@ fn validate_bundles(app: &App, selector: Option<&str>) -> CommandResult {
             registry.diagnostics().to_vec(),
             registry.validation_is_clean(),
         )
-    }) else {
+    };
+    if app.plugin_registry.is_empty() && selector.is_none() {
         return CommandResult::error(tr(app.ui_locale, MessageId::CmdPluginBundleNoneFound));
     };
     if selector.is_some() && plugins.is_empty() {
@@ -224,14 +223,12 @@ enum Mutation<'a> {
     Revoke,
 }
 
-fn mutate_bundle(app: &App, selector: &str, mutation: Mutation<'_>) -> CommandResult {
+fn mutate_bundle(app: &mut App, selector: &str, mutation: Mutation<'_>) -> CommandResult {
     if matches!(mutation, Mutation::Enable) {
-        let needs_review = crate::plugins::try_with_registry(|registry| {
-            registry
-                .get(selector)
-                .is_some_and(|plugin| !plugin.trusted())
-        })
-        .unwrap_or(false);
+        let needs_review = app
+            .plugin_registry
+            .get(selector)
+            .is_some_and(|plugin| !plugin.trusted());
         if needs_review {
             // Enabling is the natural entry point. Open the exact capability
             // review instead of leaving the user at an opaque denial.
@@ -239,10 +236,7 @@ fn mutate_bundle(app: &App, selector: &str, mutation: Mutation<'_>) -> CommandRe
         }
     }
     if let Mutation::Trust(token) = mutation {
-        let Some(expected) =
-            crate::plugins::try_with_registry(|registry| registry.get(selector).map(review_token))
-                .flatten()
-        else {
+        let Some(expected) = app.plugin_registry.get(selector).map(review_token) else {
             return CommandResult::error(
                 tr(app.ui_locale, MessageId::CmdPluginBundleNotFound).replace("{name}", selector),
             );
@@ -255,20 +249,35 @@ fn mutate_bundle(app: &App, selector: &str, mutation: Mutation<'_>) -> CommandRe
         }
     }
 
-    let result = crate::plugins::with_registry(|registry| match mutation {
-        Mutation::Trust(_) => registry.trust(selector).map(|()| "trusted"),
-        Mutation::Enable => registry.enable(selector).map(|()| "enabled"),
-        Mutation::Disable => registry.disable(selector).map(|()| "disabled"),
-        Mutation::Revoke => registry.revoke_trust(selector).map(|()| "trust-revoked"),
-    });
+    let result = match mutation {
+        Mutation::Trust(_) => std::sync::Arc::make_mut(&mut app.plugin_registry)
+            .trust(selector)
+            .map(|()| "trusted"),
+        Mutation::Enable => std::sync::Arc::make_mut(&mut app.plugin_registry)
+            .enable(selector)
+            .map(|()| "enabled"),
+        Mutation::Disable => std::sync::Arc::make_mut(&mut app.plugin_registry)
+            .disable(selector)
+            .map(|()| "disabled"),
+        Mutation::Revoke => std::sync::Arc::make_mut(&mut app.plugin_registry)
+            .revoke_trust(selector)
+            .map(|()| "trust-revoked"),
+    };
     match result {
-        Some(Ok(action)) => CommandResult::message(
-            tr(app.ui_locale, MessageId::CmdPluginBundleMutationSuccess)
-                .replace("{name}", selector)
-                .replace("{action}", action),
-        ),
-        Some(Err(error)) => action_error(app, &error),
-        None => action_error(app, "Plugin registry is not initialized"),
+        Ok(action) => {
+            app.refresh_skill_cache();
+            if matches!(mutation, Mutation::Disable | Mutation::Revoke) {
+                app.active_skill = None;
+                app.active_skill_provenance = None;
+            }
+            CommandResult::with_message_and_action(
+                tr(app.ui_locale, MessageId::CmdPluginBundleMutationSuccess)
+                    .replace("{name}", selector)
+                    .replace("{action}", action),
+                AppAction::PluginRegistryChanged,
+            )
+        }
+        Err(error) => action_error(app, &error),
     }
 }
 
@@ -288,9 +297,12 @@ fn render_bundle_detail(app: &App, plugin: &LoadedPlugin, include_hashes: bool) 
         ("hidden", "hidden")
     };
     let mut output = tr(app.ui_locale, MessageId::CmdPluginBundleDetail)
-        .replace("{name}", plugin.name())
-        .replace("{id}", plugin.id.as_str())
-        .replace("{version}", &plugin.manifest.plugin.version)
+        .replace("{name}", &escape_review_text(plugin.name()))
+        .replace("{id}", &escape_review_text(plugin.id.as_str()))
+        .replace(
+            "{version}",
+            &escape_review_text(&plugin.manifest.plugin.version),
+        )
         .replace("{origin}", plugin.origin.as_str())
         .replace("{scope}", plugin.scope.as_str())
         .replace("{state}", plugin.state_label())
@@ -301,7 +313,21 @@ fn render_bundle_detail(app: &App, plugin: &LoadedPlugin, include_hashes: bool) 
         .replace("{unsupported}", &unsupported)
         .replace("{content_hash}", content_hash)
         .replace("{capability_hash}", capability_hash)
-        .replace("{path}", &plugin.canonical_root.display().to_string());
+        .replace("{path}", &escape_review_path(&plugin.canonical_root));
+    let skills = plugin
+        .skill_snapshots
+        .iter()
+        .map(|skill| escape_review_text(&format!("{}:{}", plugin.name(), skill.name)))
+        .collect::<Vec<_>>();
+    let _ = write!(
+        output,
+        "\nQualified skills: [{}]\nActivation boundary: trust stages the exact reviewed content but does not activate it; enable rebuilds this workspace's Skill/MCP catalog immediately; disable or revoke cancels in-flight plugin MCP operations and denies queued Skills.",
+        if skills.is_empty() {
+            "none".to_string()
+        } else {
+            skills.join(", ")
+        }
+    );
     append_diagnostics(app, &mut output, &plugin.diagnostics);
     output
 }
@@ -310,12 +336,24 @@ fn render_permissions(plugin: &LoadedPlugin) -> String {
     let filesystem = if plugin.inventory.filesystem_roots.is_empty() {
         "none".to_string()
     } else {
-        plugin.inventory.filesystem_roots.join(", ")
+        plugin
+            .inventory
+            .filesystem_roots
+            .iter()
+            .map(|value| escape_review_text(value))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     let network = if plugin.inventory.network_hosts.is_empty() {
         "none".to_string()
     } else {
-        plugin.inventory.network_hosts.join(", ")
+        plugin
+            .inventory
+            .network_hosts
+            .iter()
+            .map(|value| escape_review_text(value))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     let stdio_authority = if plugin.inventory.stdio_mcp_servers == 0 {
         "none".to_string()
@@ -326,7 +364,7 @@ fn render_permissions(plugin: &LoadedPlugin) -> String {
         )
     };
     format!(
-        "filesystem_roots=[{filesystem}] network_hosts=[{network}] lifecycle_mutation={} stdio_runtime=[{stdio_authority}]",
+        "filesystem_roots=[{filesystem}] network_hosts=[{network}] (exact allowlist for Codewhale-managed remote requests; redirects stay same-origin) lifecycle_mutation={} stdio_runtime=[{stdio_authority}]",
         plugin.inventory.lifecycle_mutation
     )
 }
@@ -346,38 +384,89 @@ fn render_mcp_inventory(plugin: &LoadedPlugin) -> String {
                 "configured-off"
             };
             if let Some(command) = server.command.as_deref() {
-                let mut env_keys = server.env.keys().map(String::as_str).collect::<Vec<_>>();
-                env_keys.sort_unstable();
+                let mut env_provenance = server
+                    .env
+                    .iter()
+                    .map(|(destination, source)| {
+                        let source = source
+                            .strip_prefix("${")
+                            .and_then(|source| source.strip_suffix('}'))
+                            .unwrap_or("invalid");
+                        format!(
+                            "{} <- {}",
+                            escape_review_text(destination),
+                            escape_review_text(source)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                env_provenance.sort_unstable();
                 let cwd = server
                     .cwd
                     .as_deref()
-                    .map(|path| path.display().to_string())
+                    .map(escape_review_path)
                     .unwrap_or_else(|| "plugin-root".to_string());
+                let argv = render_review_argv(plugin, &server.args);
                 format!(
-                    "{name}: stdio command={command} args={} cwd={cwd} env_keys=[{}] host-user-authority {enabled}",
-                    server.args.len(),
-                    env_keys.join(", ")
+                    "{}: transport=stdio command={} argv=[{}] cwd={cwd} env=[{}] timeouts={} required={} enabled_tools=[{}] disabled_tools=[{}] host-user-filesystem/network-authority {enabled}",
+                    escape_review_text(name),
+                    escape_review_text(command),
+                    argv.join(", "),
+                    if env_provenance.is_empty() { "none".to_string() } else { env_provenance.join(", ") },
+                    render_mcp_timeouts(server),
+                    server.required,
+                    render_review_values(&server.enabled_tools),
+                    render_review_values(&server.disabled_tools),
                 )
             } else if let Some(url) = server.url.as_deref() {
                 let endpoint = reqwest::Url::parse(url)
                     .ok()
-                    .map(|url| url.origin().ascii_serialization())
+                    .map(|url| escape_review_text(url.as_str()))
                     .unwrap_or_else(|| "invalid-url".to_string());
-                let mut literal_header_keys =
-                    server.headers.keys().map(String::as_str).collect::<Vec<_>>();
-                literal_header_keys.sort_unstable();
-                let mut env_header_keys = server
+                let mut env_headers = server
                     .env_headers
-                    .keys()
-                    .map(String::as_str)
+                    .iter()
+                    .map(|(header, source)| {
+                        format!(
+                            "{} <- {}",
+                            escape_review_text(header),
+                            escape_review_text(source)
+                        )
+                    })
                     .collect::<Vec<_>>();
-                env_header_keys.sort_unstable();
-                let bearer = server.bearer_token_env_var.as_deref().unwrap_or("none");
+                env_headers.sort_unstable();
+                let bearer = server
+                    .bearer_token_env_var
+                    .as_deref()
+                    .map(escape_review_text)
+                    .unwrap_or_else(|| "none".to_string());
+                let oauth_client = server
+                    .oauth
+                    .as_ref()
+                    .and_then(|oauth| oauth.client_id.as_deref())
+                    .map(escape_review_text)
+                    .unwrap_or_else(|| "dynamic-registration/default".to_string());
+                let oauth_resource = server
+                    .oauth_resource
+                    .as_deref()
+                    .map(escape_review_text)
+                    .unwrap_or_else(|| "none".to_string());
+                let transport = server.transport.as_deref().unwrap_or(
+                    "streamable-http with same-origin SSE fallback",
+                );
                 format!(
-                    "{name}: remote endpoint={endpoint} literal_header_keys=[{}] env_header_keys=[{}] bearer_env={bearer} oauth_scopes={} {enabled}",
-                    literal_header_keys.join(", "),
-                    env_header_keys.join(", "),
-                    server.scopes.len()
+                    "{}: transport={} endpoint={} redirects=same-origin-only env_headers=[{}] bearer_env={} oauth_scopes=[{}] oauth_client={} oauth_resource={} timeouts={} required={} enabled_tools=[{}] disabled_tools=[{}] {enabled}",
+                    escape_review_text(name),
+                    escape_review_text(transport),
+                    endpoint,
+                    if env_headers.is_empty() { "none".to_string() } else { env_headers.join(", ") },
+                    bearer,
+                    render_review_values(&server.scopes),
+                    oauth_client,
+                    oauth_resource,
+                    render_mcp_timeouts(server),
+                    server.required,
+                    render_review_values(&server.enabled_tools),
+                    render_review_values(&server.disabled_tools),
                 )
             } else {
                 format!("{name}: invalid")
@@ -385,6 +474,109 @@ fn render_mcp_inventory(plugin: &LoadedPlugin) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+fn render_review_argv(plugin: &LoadedPlugin, arguments: &[String]) -> Vec<String> {
+    arguments
+        .iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            let position = index + 1;
+            if argument.starts_with('-') {
+                let flag = argument
+                    .split_once('=')
+                    .map_or(argument.as_str(), |(flag, _)| flag);
+                let suffix = if argument.contains('=') {
+                    "=<redacted>"
+                } else {
+                    ""
+                };
+                return format!("#{position} flag={}{}", escape_review_text(flag), suffix);
+            }
+            let candidate = plugin.canonical_root.join(argument);
+            if candidate.exists()
+                && candidate
+                    .canonicalize()
+                    .is_ok_and(|path| path.starts_with(&plugin.canonical_root))
+            {
+                return format!("#{position} plugin-path={}", escape_review_text(argument));
+            }
+            format!("#{position} opaque=<redacted>")
+        })
+        .collect()
+}
+
+fn render_review_values(values: &[String]) -> String {
+    if values.is_empty() {
+        return "none".to_string();
+    }
+    values
+        .iter()
+        .map(|value| escape_review_text(value))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_mcp_timeouts(server: &crate::mcp::McpServerConfig) -> String {
+    format!(
+        "connect={}/execute={}/read={}",
+        server
+            .connect_timeout
+            .map_or_else(|| "default".to_string(), |value| format!("{value}s")),
+        server
+            .execute_timeout
+            .map_or_else(|| "default".to_string(), |value| format!("{value}s")),
+        server
+            .read_timeout
+            .map_or_else(|| "default".to_string(), |value| format!("{value}s")),
+    )
+}
+
+fn escape_review_path(path: &Path) -> String {
+    escape_review_text(&path.to_string_lossy())
+}
+
+fn escape_review_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_control()
+            || matches!(
+                ch,
+                '\u{061c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+        {
+            let _ = write!(escaped, "\\u{{{:x}}}", ch as u32);
+        } else if matches!(
+            ch,
+            '\\' | '`'
+                | '*'
+                | '_'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '#'
+                | '+'
+                | '-'
+                | '.'
+                | '!'
+                | '|'
+        ) {
+            escaped.push('\\');
+            escaped.push(ch);
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped
 }
 
 fn review_token(plugin: &LoadedPlugin) -> String {
@@ -419,12 +611,13 @@ fn append_diagnostics(
         let path = diagnostic
             .path
             .as_deref()
-            .map(|path| format!(" ({})", path.display()))
+            .map(|path| format!(" ({})", escape_review_path(path)))
             .unwrap_or_default();
         let _ = writeln!(
             output,
             "• {level} [{}]: {}{path}",
-            diagnostic.code, diagnostic.message
+            diagnostic.code,
+            escape_review_text(&diagnostic.message)
         );
     }
 }
@@ -623,6 +816,7 @@ mod tests {
     fn write_mcp_review_bundle(root: &Path) {
         let bundle = root.join(".codewhale/plugins/review-mcp");
         fs::create_dir_all(&bundle).unwrap();
+        fs::write(bundle.join("server.js"), "// reviewed entrypoint\n").unwrap();
         fs::write(
             bundle.join("plugin.toml"),
             r#"schema_version = 1
@@ -635,18 +829,18 @@ command = "node"
 args = ["server.js", "--token", "must-not-be-rendered-from-args"]
 
 [mcp_servers.local.env]
-PLUGIN_TOKEN = "must-not-be-rendered-from-env"
+PLUGIN_TOKEN = "${PLUGIN_TOKEN_SOURCE}"
 
 [mcp_servers.remote]
 url = "https://example.invalid/mcp"
 bearer_token_env_var = "REMOTE_TOKEN"
 scopes = ["tools.read"]
 
-[mcp_servers.remote.headers]
-Authorization = "must-not-be-rendered-from-headers"
-
 [mcp_servers.remote.env_headers]
 X_Api_Key = "REMOTE_API_KEY"
+
+[capabilities]
+network_hosts = ["example.invalid"]
 "#,
         )
         .unwrap();
@@ -673,7 +867,6 @@ X_Api_Key = "REMOTE_API_KEY"
             "api_key = [\"must-not-be-re-read\"\n",
         )
         .unwrap();
-        crate::plugins::init_registry(root.path());
         let state_path = codewhale_home.join("plugins/state.json");
 
         for arg in [Some("list"), Some("show demo"), Some("validate")] {
@@ -695,8 +888,6 @@ X_Api_Key = "REMOTE_API_KEY"
             crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
         write_bundle(root.path());
         let (mut app, _temp) = create_test_app(root.path());
-        crate::plugins::init_registry(root.path());
-
         let enable_review = plugins(&mut app, Some("enable demo"));
         assert!(!enable_review.is_error);
         assert!(
@@ -705,22 +896,22 @@ X_Api_Key = "REMOTE_API_KEY"
                 .as_deref()
                 .is_some_and(|message| message.contains("/plugin trust demo "))
         );
-        assert!(!crate::plugins::try_with_registry(|r| r.get("demo").unwrap().trusted()).unwrap());
+        assert!(!app.plugin_registry.get("demo").unwrap().trusted());
 
         let review = plugins(&mut app, Some("trust demo")).message.unwrap();
         let confirmation = review
             .lines()
             .find(|line| line.starts_with("/plugin trust demo "))
             .unwrap();
-        assert!(!crate::plugins::try_with_registry(|r| r.get("demo").unwrap().trusted()).unwrap());
+        assert!(!app.plugin_registry.get("demo").unwrap().trusted());
 
         assert!(plugins(&mut app, Some("trust demo wrong")).is_error);
         let arg = confirmation.trim_start_matches("/plugin ");
         assert!(!plugins(&mut app, Some(arg)).is_error);
         assert!(!plugins(&mut app, Some("enable demo")).is_error);
-        assert!(crate::plugins::try_with_registry(|r| r.is_active("demo")).unwrap());
+        assert!(app.plugin_registry.is_active("demo"));
         assert!(!plugins(&mut app, Some("disable demo")).is_error);
-        assert!(!crate::plugins::try_with_registry(|r| r.is_active("demo")).unwrap());
+        assert!(!app.plugin_registry.is_active("demo"));
     }
 
     #[test]
@@ -731,17 +922,16 @@ X_Api_Key = "REMOTE_API_KEY"
             crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
         write_mcp_review_bundle(root.path());
         let (mut app, _temp) = create_test_app(root.path());
-        crate::plugins::init_registry(root.path());
-
         let review = plugins(&mut app, Some("trust review-mcp"))
             .message
             .expect("review output");
         assert!(review.contains("mcp=2 (stdio=1 remote=1)"));
         assert!(review.contains("host-user filesystem/network authority"));
-        assert!(review.contains("env_keys=[PLUGIN_TOKEN]"));
-        assert!(review.contains("literal_header_keys=[Authorization]"));
-        assert!(review.contains("env_header_keys=[X_Api_Key]"));
-        assert!(review.contains("bearer_env=REMOTE_TOKEN"));
+        assert!(review.contains("PLUGIN\\_TOKEN <- PLUGIN\\_TOKEN\\_SOURCE"));
+        assert!(review.contains("X\\_Api\\_Key <- REMOTE\\_API\\_KEY"));
+        assert!(review.contains("bearer_env=REMOTE\\_TOKEN"));
+        assert!(review.contains("redirects=same-origin-only"));
+        assert!(review.contains("Qualified skills: [none]"));
         assert!(!review.contains("must-not-be-rendered"));
     }
 
@@ -757,7 +947,6 @@ X_Api_Key = "REMOTE_API_KEY"
             "# name: greet\n# description: Say hello\n# approval: required\n",
         )
         .unwrap();
-        crate::plugins::init_registry(root.path());
         let result = plugins(&mut app, Some("tools greet"));
         assert!(!result.is_error);
         let message = result.message.unwrap();

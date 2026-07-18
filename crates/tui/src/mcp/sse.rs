@@ -93,22 +93,33 @@ impl SseTransport {
         tx: tokio::sync::mpsc::UnboundedSender<SseInbound>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
-        let headers = auth.resolved_headers().await?;
-        let response = apply_safe_custom_headers(
+        let headers = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                anyhow::bail!("MCP SSE connect cancelled before authentication completed")
+            }
+            headers = auth.resolved_headers() => headers?,
+        };
+        let request = apply_safe_custom_headers(
             with_default_mcp_http_headers(client.get(&url), false),
             &headers,
-        )
-        .send()
-        .await
-        .with_context(|| {
-            format!(
-                "MCP SSE connect failed (transport=http url={})",
-                mask_url_secrets(&url),
-            )
-        })?;
+        );
+        let response = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                anyhow::bail!("MCP SSE connect cancelled before the request completed")
+            }
+            response = request.send() => response.with_context(|| {
+                format!(
+                    "MCP SSE connect failed (transport=http url={})",
+                    mask_url_secrets(&url),
+                )
+            })?,
+        };
         let status = response.status();
         if !status.is_success() {
             let body_excerpt = bounded_body_excerpt(response, ERROR_BODY_PREVIEW_BYTES).await;
+            let body_excerpt = auth.server_error_preview(&body_excerpt);
             anyhow::bail!(
                 "MCP SSE rejected (transport=http url={} status={}): {}",
                 mask_url_secrets(&url),
@@ -276,7 +287,9 @@ impl McpTransport for SseTransport {
         let status = response.status();
         if !status.is_success() {
             let body_excerpt = bounded_body_excerpt(response, ERROR_BODY_PREVIEW_BYTES).await;
-            if is_mcp_stale_session_body(&body_excerpt) {
+            let stale_session = is_mcp_stale_session_body(&body_excerpt);
+            let body_excerpt = self.auth.server_error_preview(&body_excerpt);
+            if stale_session {
                 anyhow::bail!(
                     "MCP session expired (transport=sse endpoint={} status={}): {}",
                     mask_url_secrets(&endpoint),
@@ -307,6 +320,19 @@ impl McpTransport for SseTransport {
                 SseInbound::Message(msg) => return Ok(msg),
             }
         }
+    }
+
+    async fn shutdown(&mut self) {
+        self.sse_task.abort();
+    }
+}
+
+impl Drop for SseTransport {
+    fn drop(&mut self) {
+        // Dropping a JoinHandle detaches its task. Abort explicitly so a
+        // cancelled connection cannot leave an auth refresh, connect, or SSE
+        // body stream running without an authority owner.
+        self.sse_task.abort();
     }
 }
 

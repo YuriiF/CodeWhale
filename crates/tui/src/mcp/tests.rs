@@ -79,6 +79,76 @@ fn test_mcp_config_defaults() {
 }
 
 #[test]
+fn reviewed_remote_endpoint_identity_normalizes_case_idna_and_default_ports() {
+    let canonical = reviewed_remote_endpoint_identity("https://example.com/mcp").unwrap();
+    assert_eq!(
+        reviewed_remote_endpoint_identity("https://EXAMPLE.COM:443/mcp").unwrap(),
+        canonical
+    );
+    assert_eq!(
+        reviewed_remote_endpoint_identity("https://BÜCHER.example:443/mcp").unwrap(),
+        reviewed_remote_endpoint_identity("https://xn--bcher-kva.example/mcp").unwrap()
+    );
+    assert_ne!(
+        reviewed_remote_endpoint_identity("https://example.com:444/mcp").unwrap(),
+        canonical
+    );
+    assert!(reviewed_remote_endpoint_identity("http://localhost:8080/mcp").is_ok());
+    assert!(reviewed_remote_endpoint_identity("http://127.0.0.1/mcp").is_ok());
+    assert!(reviewed_remote_endpoint_identity("http://[::1]/mcp").is_ok());
+}
+
+#[test]
+fn reviewed_remote_endpoint_identity_rejects_ambiguous_or_secret_bearing_urls() {
+    for endpoint in [
+        "http://example.com/mcp",
+        "ftp://example.com/mcp",
+        "https://user@example.com/mcp",
+        "https://user:secret@example.com/mcp",
+        "https://example.com/mcp?token=secret",
+        "https://example.com/mcp#fragment",
+    ] {
+        let error = reviewed_remote_endpoint_identity(endpoint)
+            .expect_err("unsafe reviewed endpoint must fail closed")
+            .to_string();
+        assert!(
+            !error.contains("secret"),
+            "endpoint error leaked URL material"
+        );
+    }
+}
+
+#[test]
+fn reviewed_plugin_redirects_are_exact_normalized_origin_only() {
+    let approved = reviewed_remote_endpoint_identity("https://BÜCHER.example:443/mcp")
+        .unwrap()
+        .1;
+    let accepted = [
+        "https://xn--bcher-kva.example/next",
+        "https://BÜCHER.example:443/next?cursor=opaque",
+    ];
+    for endpoint in accepted {
+        assert!(reviewed_redirect_matches_origin(
+            &reqwest::Url::parse(endpoint).unwrap(),
+            &approved
+        ));
+    }
+
+    let rejected = [
+        "http://xn--bcher-kva.example/next",
+        "https://user@xn--bcher-kva.example/next",
+        "https://xn--bcher-kva.example:444/next",
+        "https://other.example/next",
+    ];
+    for endpoint in rejected {
+        assert!(!reviewed_redirect_matches_origin(
+            &reqwest::Url::parse(endpoint).unwrap(),
+            &approved
+        ));
+    }
+}
+
+#[test]
 fn test_mcp_config_parse() {
     let json = r#"{
         "timeouts": {
@@ -788,6 +858,7 @@ fn plugin_mcp_servers_are_qualified_and_resolve_relative_cwd() {
     let dir = tempfile::tempdir().unwrap();
     let plugin_base = dir.path().join("plugins").join("fleet");
     fs::create_dir_all(plugin_base.join("servers/local")).unwrap();
+    fs::write(plugin_base.join("servers/local/server.js"), "// server\n").unwrap();
 
     fs::write(
         plugin_base.join("plugin.toml"),
@@ -804,37 +875,44 @@ cwd = "servers/local"
 
 [mcp_servers.remote]
 url = "https://example.invalid/mcp"
+
+[capabilities]
+network_hosts = ["example.invalid"]
 "#,
     )
     .unwrap();
-    let mut plugin =
-        crate::plugins::discovery::load_plugin_for_test(&plugin_base.join("plugin.toml")).unwrap();
-    plugin.enabled = true;
-    plugin.trust_status = crate::plugins::types::PluginTrustStatus::Trusted;
+    let (plugin, authority) = active_plugin_fixture(&plugin_base);
     let plugin_for_collision = plugin.clone();
+    let authority_for_collision = authority.clone();
     let mut config = McpConfig::default();
     config.servers.insert(
         "global".to_string(),
         serde_json::from_str(r#"{"command":"node","args":["global.js"]}"#).unwrap(),
     );
 
-    let cfg =
-        merge_plugin_mcp_servers_from_plugins(config, vec![("fleet".to_string(), plugin)]).unwrap();
+    let cfg = merge_plugin_mcp_servers_from_plugins(
+        config,
+        vec![("fleet".to_string(), plugin, authority)],
+    )
+    .unwrap();
 
     assert!(cfg.servers.contains_key("global"));
 
     let local = cfg.servers.get("fleet-local").unwrap();
     assert_eq!(local.command.as_deref(), Some("node"));
-    assert_eq!(local.args, vec!["server.js"]);
+    let staged_root = plugin_for_collision.staged_root.as_deref().unwrap();
+    assert_eq!(
+        local.args,
+        vec![
+            staged_root
+                .join("servers/local/server.js")
+                .display()
+                .to_string()
+        ]
+    );
     assert_eq!(
         local.cwd.as_deref(),
-        Some(
-            plugin_base
-                .join("servers/local")
-                .canonicalize()
-                .unwrap()
-                .as_path()
-        )
+        Some(staged_root.join("servers/local").as_path())
     );
 
     let remote = cfg.servers.get("fleet-remote").unwrap();
@@ -848,7 +926,11 @@ url = "https://example.invalid/mcp"
     );
     let collision_safe = merge_plugin_mcp_servers_from_plugins(
         explicit,
-        vec![("fleet".to_string(), plugin_for_collision)],
+        vec![(
+            "fleet".to_string(),
+            plugin_for_collision,
+            authority_for_collision,
+        )],
     )
     .unwrap();
     assert_eq!(
@@ -876,15 +958,16 @@ command = "node"
 "#,
     )
     .unwrap();
-    let disabled =
-        crate::plugins::discovery::load_plugin_for_test(&plugin_base.join("plugin.toml")).unwrap();
+    let (mut disabled, authority) = active_plugin_fixture(&plugin_base);
+    disabled.enabled = false;
     let mut untrusted = disabled.clone();
     untrusted.enabled = true;
+    untrusted.trust_status = crate::plugins::types::PluginTrustStatus::NeverReviewed;
 
     for plugin in [disabled, untrusted] {
         let config = merge_plugin_mcp_servers_from_plugins(
             McpConfig::default(),
-            vec![("denied".to_string(), plugin)],
+            vec![("denied".to_string(), plugin, authority.clone())],
         )
         .unwrap();
         assert!(
@@ -913,14 +996,12 @@ command = "node"
 "#,
     )
     .unwrap();
-    let mut plugin = crate::plugins::discovery::load_plugin_for_test(&manifest_path).unwrap();
-    plugin.enabled = true;
-    plugin.trust_status = crate::plugins::types::PluginTrustStatus::Trusted;
+    let (plugin, authority) = active_plugin_fixture(&plugin_base);
     fs::write(plugin_base.join("late-change.txt"), "changed after review").unwrap();
 
     let config = merge_plugin_mcp_servers_from_plugins(
         McpConfig::default(),
-        vec![("changed".to_string(), plugin)],
+        vec![("changed".to_string(), plugin, authority)],
     )
     .unwrap();
     assert!(config.servers.is_empty());
@@ -1013,6 +1094,7 @@ connect_timeout = 1
     .unwrap();
 
     let discovery = crate::plugins::discovery::DiscoveryConfig {
+        workspace: dir.path().join("project"),
         user_plugins_dir: plugins_root,
         workspace_plugins_dir: dir.path().join("workspace-plugins"),
         builtin_plugin_dirs: Vec::new(),
@@ -1022,9 +1104,10 @@ connect_timeout = 1
     registry.trust("guarded").unwrap();
     registry.enable("guarded").unwrap();
     let active = registry.active_plugins()[0].clone();
+    let authority = registry.authority_for("guarded").unwrap();
     let merged = merge_plugin_mcp_servers_from_plugins(
         McpConfig::default(),
-        vec![("guarded".to_string(), active)],
+        vec![("guarded".to_string(), active, authority)],
     )
     .unwrap();
     assert!(
@@ -1045,13 +1128,335 @@ connect_timeout = 1
         .err()
         .expect("changed reviewed component must be denied before spawn");
     let message = format!("{error:#}");
-    assert!(message.contains("Refusing to spawn MCP server 'guarded-local'"));
-    assert!(message.contains("changed after its trust review or MCP pool construction"));
+    assert!(
+        message.contains("Refusing to use MCP server 'guarded-local'"),
+        "unexpected pre-spawn denial: {message}"
+    );
+    assert!(message.contains("changed after review"));
     assert!(message.contains("/plugin reload"));
     assert!(
         !executed_marker.exists(),
         "mutated MCP component executed despite pre-spawn hash denial"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn plugin_mcp_inflight_call_is_cancelled_after_cross_process_revocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugins_root = dir.path().join("plugins");
+    let plugin_base = plugins_root.join("revoked");
+    fs::create_dir_all(&plugin_base).unwrap();
+    fs::create_dir_all(dir.path().join("project")).unwrap();
+    fs::write(
+        plugin_base.join("server.sh"),
+        r#"#!/bin/sh
+trap 'exit 0' TERM INT
+while IFS= read -r line; do
+    case "$line" in
+        *'"method":"notifications/initialized"'*)
+            ;;
+        *'"method":"initialize"'*)
+            printf '%s\n' '{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"revocation-test","version":"1.0.0"},"capabilities":{"tools":{}}}}'
+            ;;
+        *'"method":"tools/list"'*)
+            printf '%s\n' '{"jsonrpc":"2.0","id":"2","result":{"tools":[{"name":"wait","description":"Wait until revoked","inputSchema":{"type":"object"}}]}}'
+            ;;
+        *'"method":"tools/call"'*)
+            : > call.marker
+            while :; do sleep 1; done
+            ;;
+    esac
+done
+"#,
+    )
+    .unwrap();
+    fs::write(
+        plugin_base.join("plugin.toml"),
+        r#"
+schema_version = 1
+[plugin]
+name = "revoked"
+version = "1.0.0"
+
+[mcp_servers.local]
+command = "sh"
+args = ["server.sh"]
+connect_timeout = 2
+execute_timeout = 30
+read_timeout = 30
+"#,
+    )
+    .unwrap();
+
+    let discovery = crate::plugins::discovery::DiscoveryConfig {
+        workspace: dir.path().join("project"),
+        user_plugins_dir: plugins_root,
+        workspace_plugins_dir: dir.path().join("workspace-plugins-unused"),
+        builtin_plugin_dirs: Vec::new(),
+        state_path: dir.path().join("plugin-state.json"),
+    };
+    let mut registry = crate::plugins::discovery::discover_with_config(&discovery);
+    registry.trust("revoked").unwrap();
+    registry.enable("revoked").unwrap();
+    let active = registry.active_plugins()[0].clone();
+    let authority = registry.authority_for("revoked").unwrap();
+    let call_marker = authority
+        .staged_manifest
+        .parent()
+        .unwrap()
+        .join("call.marker");
+    let merged = merge_plugin_mcp_servers_from_plugins(
+        McpConfig::default(),
+        vec![("revoked".to_string(), active, authority)],
+    )
+    .unwrap();
+    let mut pool = McpPool::new(merged);
+    pool.get_or_connect("revoked-local").await.unwrap();
+
+    let call = tokio::spawn(async move {
+        pool.call_tool("mcp_revoked-local_wait", serde_json::json!({}))
+            .await
+    });
+    for _ in 0..100 {
+        if call_marker.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        call_marker.exists(),
+        "test server never observed the in-flight tool call"
+    );
+
+    let mut external = crate::plugins::discovery::discover_with_config(&discovery);
+    external.revoke_trust("revoked").unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), call)
+        .await
+        .expect("revocation watcher did not cancel the in-flight call")
+        .unwrap();
+    let error = result
+        .expect_err("revoked in-flight call must not complete")
+        .to_string();
+    assert!(error.contains("cancelled after authority changed"));
+    assert!(error.contains("disabled, revoked, or no longer matches"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn plugin_stdio_authority_cancellation_terminates_an_idle_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin_base = dir.path().join("plugins/idle-child");
+    fs::create_dir_all(&plugin_base).unwrap();
+    fs::write(
+        plugin_base.join("plugin.toml"),
+        "schema_version = 1\n[plugin]\nname = \"idle-child\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    let (_, authority) = active_plugin_fixture(&plugin_base);
+    let mut config = test_server_config();
+    config.command = Some("sh".to_string());
+    config.args = vec![
+        "-c".to_string(),
+        "trap 'exit 0' TERM INT; while :; do sleep 1; done".to_string(),
+    ];
+    config.reviewed_plugin =
+        Some(ReviewedPluginMcpSource::from_authority(authority, None).unwrap());
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let transport = StdioTransport::spawn(
+        "idle-child",
+        config.command.as_deref().unwrap(),
+        &config,
+        cancellation.clone(),
+    )
+    .unwrap();
+    assert!(transport.child.lock().await.try_wait().unwrap().is_none());
+
+    cancellation.cancel();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if transport.child.lock().await.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "authority cancellation left the plugin stdio child alive"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn plugin_stdio_does_not_surface_reviewed_child_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin_base = dir.path().join("plugins/stderr-secret");
+    fs::create_dir_all(&plugin_base).unwrap();
+    fs::write(
+        plugin_base.join("plugin.toml"),
+        "schema_version = 1\n[plugin]\nname = \"stderr-secret\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    let (_, authority) = active_plugin_fixture(&plugin_base);
+    let mut config = test_server_config();
+    config.command = Some("sh".to_string());
+    config.args = vec![
+        "-c".to_string(),
+        "echo 'ARBITRARY_PLUGIN_CREDENTIAL' 1>&2; exit 1".to_string(),
+    ];
+    config.reviewed_plugin =
+        Some(ReviewedPluginMcpSource::from_authority(authority, None).unwrap());
+    let mut transport = StdioTransport::spawn(
+        "stderr-secret",
+        config.command.as_deref().unwrap(),
+        &config,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let error = transport
+        .recv()
+        .await
+        .expect_err("reviewed child should have closed its transport")
+        .to_string();
+    assert!(error.contains("Stdio transport closed"));
+    assert!(!error.contains("ARBITRARY_PLUGIN_CREDENTIAL"));
+}
+
+#[tokio::test]
+async fn revoked_plugin_mcp_denies_catalog_tool_resource_and_prompt_operations() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugins_root = dir.path().join("plugins");
+    let plugin_base = plugins_root.join("catalog-guard");
+    fs::create_dir_all(&plugin_base).unwrap();
+    fs::create_dir_all(dir.path().join("project")).unwrap();
+    fs::write(
+        plugin_base.join("plugin.toml"),
+        "schema_version = 1\n[plugin]\nname = \"catalog-guard\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    let discovery = crate::plugins::discovery::DiscoveryConfig {
+        workspace: dir.path().join("project"),
+        user_plugins_dir: plugins_root,
+        workspace_plugins_dir: dir.path().join("workspace-plugins-unused"),
+        builtin_plugin_dirs: Vec::new(),
+        state_path: dir.path().join("plugin-state.json"),
+    };
+    let mut registry = crate::plugins::discovery::discover_with_config(&discovery);
+    registry.trust("catalog-guard").unwrap();
+    registry.enable("catalog-guard").unwrap();
+    let authority = registry.authority_for("catalog-guard").unwrap();
+
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let mut connection = test_connection(Box::new(ScriptedValueTransport {
+        sent: Arc::clone(&sent),
+        responses: VecDeque::new(),
+    }));
+    let source = ReviewedPluginMcpSource::from_authority(authority, None).unwrap();
+    connection.config.reviewed_plugin = Some(source.clone());
+    connection.tools.push(McpTool {
+        name: "echo".to_string(),
+        description: None,
+        input_schema: serde_json::json!({}),
+    });
+    connection.resources.push(McpResource {
+        uri: "memory://one".to_string(),
+        name: "one".to_string(),
+        description: None,
+        mime_type: None,
+    });
+    connection.resource_templates.push(McpResourceTemplate {
+        uri_template: "memory://{id}".to_string(),
+        name: "memory".to_string(),
+        description: None,
+        mime_type: None,
+    });
+    connection.prompts.push(McpPrompt {
+        name: "review".to_string(),
+        description: None,
+        arguments: Vec::new(),
+    });
+    let mut config = McpConfig::default();
+    let mut server = test_server_config();
+    server.reviewed_plugin = Some(source);
+    config.servers.insert("guarded".to_string(), server);
+    let mut pool = McpPool::new(config);
+    pool.connections.insert("guarded".to_string(), connection);
+    assert_eq!(pool.all_tools().len(), 1);
+    assert_eq!(pool.all_resources().len(), 1);
+    assert_eq!(pool.all_resource_templates().len(), 1);
+    assert_eq!(pool.all_prompts().len(), 1);
+
+    let mut external = crate::plugins::discovery::discover_with_config(&discovery);
+    external.revoke_trust("catalog-guard").unwrap();
+    assert!(pool.all_tools().is_empty());
+    assert!(pool.all_resources().is_empty());
+    assert!(pool.all_resource_templates().is_empty());
+    assert!(pool.all_prompts().is_empty());
+
+    let tool = pool
+        .call_tool("mcp_guarded_echo", serde_json::json!({}))
+        .await;
+    let resource = pool.read_resource("guarded", "memory://one").await;
+    let prompt = pool
+        .get_prompt("guarded", "review", serde_json::json!({}))
+        .await;
+    let resource_catalog = pool
+        .call_tool(
+            "list_mcp_resources",
+            serde_json::json!({"server": "guarded"}),
+        )
+        .await;
+    let template_catalog = pool
+        .call_tool(
+            "list_mcp_resource_templates",
+            serde_json::json!({"server": "guarded"}),
+        )
+        .await;
+    for result in [tool, resource, prompt, resource_catalog, template_catalog] {
+        let error = result
+            .expect_err("revoked plugin MCP operation must fail closed")
+            .to_string();
+        assert!(error.contains("Refusing to use MCP server 'guarded'"));
+    }
+    assert!(
+        sent.lock().unwrap().is_empty(),
+        "revoked plugin MCP operation reached the transport"
+    );
+}
+
+fn active_plugin_fixture(
+    plugin_base: &Path,
+) -> (
+    crate::plugins::types::LoadedPlugin,
+    crate::plugins::types::PluginAuthority,
+) {
+    let plugins_root = plugin_base.parent().expect("plugin parent").to_path_buf();
+    let root = plugins_root.parent().unwrap_or(&plugins_root).to_path_buf();
+    let discovery = crate::plugins::discovery::DiscoveryConfig {
+        workspace: root.join("project"),
+        user_plugins_dir: plugins_root,
+        workspace_plugins_dir: root.join("workspace-plugins-unused"),
+        builtin_plugin_dirs: Vec::new(),
+        state_path: root.join(format!(
+            "plugin-state-{}.json",
+            plugin_base.file_name().unwrap().to_string_lossy()
+        )),
+    };
+    let mut registry = crate::plugins::discovery::discover_with_config(&discovery);
+    let name = registry
+        .list()
+        .first()
+        .expect("discovered plugin")
+        .name()
+        .to_string();
+    registry.trust(&name).unwrap();
+    registry.enable(&name).unwrap();
+    (
+        registry.get(&name).unwrap().clone(),
+        registry.authority_for(&name).unwrap(),
+    )
 }
 
 #[test]
@@ -1686,6 +2091,8 @@ fn test_connection(transport: Box<dyn McpTransport>) -> McpConnection {
         discovery_timeout: Duration::from_secs(default_connect_timeout()),
         read_timeout_secs: default_read_timeout(),
         cancel_token: tokio_util::sync::CancellationToken::new(),
+        authority_revocation_reason: Arc::new(std::sync::Mutex::new(None)),
+        authority_watch: None,
     }
 }
 
@@ -2755,9 +3162,18 @@ fn mask_url_secrets_passes_through_clean_url() {
 
 #[test]
 fn redact_body_preview_masks_bearer_token() {
-    let redacted = redact_body_preview("Authorization: Bearer abc.def.ghi end");
-    assert!(redacted.contains("Bearer ***"), "redacted: {redacted}");
-    assert!(!redacted.contains("abc.def.ghi"), "leaked: {redacted}");
+    let redacted = redact_body_preview(
+        "Authorization: Bearer abc.def.ghi end; authorization: bearer second-token end",
+    );
+    assert_eq!(
+        redacted.matches("Bearer ***").count() + redacted.matches("bearer ***").count(),
+        2,
+        "redacted: {redacted}"
+    );
+    assert!(
+        !redacted.contains("abc.def.ghi") && !redacted.contains("second-token"),
+        "leaked: {redacted}"
+    );
 }
 
 #[test]
@@ -2798,13 +3214,38 @@ fn redact_proxy_userinfo_strips_password() {
 
 #[test]
 fn redact_body_preview_masks_api_key_param() {
-    let redacted = redact_body_preview("error message api_key=sk-12345&other=val");
+    let redacted = redact_body_preview("error api_key=sk-12345&other=val then TOKEN=second-secret");
     assert!(redacted.contains("api_key=***"), "redacted: {redacted}");
-    assert!(!redacted.contains("sk-12345"), "leaked: {redacted}");
+    assert!(redacted.contains("TOKEN=***"), "redacted: {redacted}");
+    assert!(
+        !redacted.contains("sk-12345") && !redacted.contains("second-secret"),
+        "leaked: {redacted}"
+    );
     assert!(
         redacted.contains("other=val"),
         "non-secret preserved: {redacted}"
     );
+}
+
+#[test]
+fn reviewed_plugin_server_errors_suppress_arbitrary_details() {
+    let auth = McpHttpAuth {
+        suppress_server_error_details: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        auth.server_error_preview("arbitrary credential value"),
+        "<server details suppressed for reviewed plugin>"
+    );
+
+    let response = serde_json::json!({
+        "error": { "message": "arbitrary credential value" }
+    });
+    let error = response_result(&response, "tools/call", true)
+        .expect_err("reviewed plugin JSON-RPC error must be generic")
+        .to_string();
+    assert!(!error.contains("arbitrary credential value"));
+    assert!(error.contains("details suppressed"));
 }
 
 #[test]
@@ -2847,10 +3288,11 @@ async fn stdio_transport_shutdown_terminates_child() {
     let stdin = child.stdin.take().expect("child stdin");
     let stdout = child.stdout.take().expect("child stdout");
     let mut transport = StdioTransport {
-        child,
+        child: Arc::new(tokio::sync::Mutex::new(child)),
         stdin,
         reader: tokio::io::BufReader::new(stdout),
         stderr_tail: StderrTail::new(),
+        authority_cancel_watch: None,
     };
 
     // shutdown() should send SIGTERM and complete within the grace window.
@@ -2909,10 +3351,11 @@ async fn stdio_transport_recv_error_includes_stderr_tail() {
     }
 
     let mut transport = StdioTransport {
-        child,
+        child: Arc::new(tokio::sync::Mutex::new(child)),
         stdin,
         reader: tokio::io::BufReader::new(stdout),
         stderr_tail,
+        authority_cancel_watch: None,
     };
 
     // Give the subprocess time to write its stderr line and exit.
@@ -3396,6 +3839,60 @@ async fn streamable_http_caps_chunked_bodies_without_content_length() {
         .expect("a chunked body under the cap reads fine");
     assert_eq!(body, "x".repeat(16));
 
+    server.abort();
+}
+
+#[tokio::test]
+async fn error_body_excerpt_stops_at_cap_without_waiting_for_eof() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let _lock = lock_mcp_loopback_tests().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_cancel = tokio_util::sync::CancellationToken::new();
+    let task_cancel = server_cancel.clone();
+
+    // Deliberately omit the terminating zero-sized chunk and keep the socket
+    // open. A `.text()`-based diagnostic would wait for EOF; the bounded
+    // reader must return as soon as the first chunk reaches the cap.
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0; 1024];
+        loop {
+            let n = socket.read(&mut buf).await.unwrap();
+            if n == 0 {
+                return;
+            }
+            request.extend_from_slice(&buf[..n]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        socket
+            .write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n100\r\n",
+            )
+            .await
+            .unwrap();
+        socket.write_all(&[b'x'; 256]).await.unwrap();
+        socket.write_all(b"\r\n").await.unwrap();
+        socket.flush().await.unwrap();
+        task_cancel.cancelled().await;
+    });
+
+    let response = test_http_client()
+        .get(format!("http://{addr}/preview"))
+        .send()
+        .await
+        .unwrap();
+    let preview = tokio::time::timeout(Duration::from_secs(1), bounded_body_excerpt(response, 64))
+        .await
+        .expect("bounded excerpt must not wait for an attacker-controlled EOF");
+    assert_eq!(preview, format!("{}…", "x".repeat(64)));
+
+    server_cancel.cancel();
     server.abort();
 }
 

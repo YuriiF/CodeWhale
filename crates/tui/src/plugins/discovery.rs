@@ -16,6 +16,7 @@ const STATE_FILE: &str = "state.json";
 
 #[derive(Debug, Clone)]
 pub struct DiscoveryConfig {
+    pub workspace: PathBuf,
     pub user_plugins_dir: PathBuf,
     pub workspace_plugins_dir: PathBuf,
     pub builtin_plugin_dirs: Vec<PathBuf>,
@@ -27,6 +28,7 @@ impl DiscoveryConfig {
     pub fn for_workspace(workspace: &Path) -> Self {
         let user_plugins_dir = default_user_plugins_dir();
         Self {
+            workspace: workspace.to_path_buf(),
             state_path: user_plugins_dir.join(STATE_FILE),
             user_plugins_dir,
             workspace_plugins_dir: default_workspace_plugins_dir(workspace),
@@ -142,7 +144,12 @@ pub fn discover_with_config(config: &DiscoveryConfig) -> PluginRegistry {
         plugins.push(plugin);
     }
 
-    PluginRegistry::from_discovery(plugins, diagnostics, config.state_path.clone())
+    PluginRegistry::from_discovery(
+        plugins,
+        diagnostics,
+        config.state_path.clone(),
+        config.workspace.clone(),
+    )
 }
 
 fn scan_root(
@@ -333,6 +340,7 @@ fn load_plugin(
         manifest: validated.manifest,
         base_path: validated.canonical_root.clone(),
         canonical_root: validated.canonical_root,
+        staged_root: None,
         scope,
         origin,
         enabled: false,
@@ -342,6 +350,7 @@ fn load_plugin(
         components: validated.components,
         content_hash: validated.content_hash,
         capability_hash: validated.capability_hash,
+        state_generation: 0,
         skill_snapshots,
         diagnostics,
     })
@@ -394,6 +403,7 @@ mod tests {
 
     fn config(tmp: &Path) -> DiscoveryConfig {
         DiscoveryConfig {
+            workspace: tmp.join("project"),
             user_plugins_dir: tmp.join("user"),
             workspace_plugins_dir: tmp.join("workspace"),
             builtin_plugin_dirs: vec![tmp.join("builtin")],

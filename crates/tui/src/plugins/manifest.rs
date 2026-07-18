@@ -15,6 +15,12 @@ const MAX_COMPONENT_PATHS: usize = 64;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_HASHED_FILES: usize = 4_096;
 const MAX_HASHED_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_MCP_ARGS: usize = 64;
+const MAX_MCP_ENV: usize = 64;
+const MAX_MCP_HEADERS: usize = 64;
+const MAX_MCP_SCOPES: usize = 64;
+const MAX_MCP_TOOL_FILTERS: usize = 256;
+const MAX_MCP_TIMEOUT_SECS: u64 = 3_600;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -243,6 +249,7 @@ impl PluginManifest {
         let bytes = read_manifest_bytes(path)?;
         let content = std::str::from_utf8(&bytes)
             .map_err(|_| "plugin.toml must be valid UTF-8".to_string())?;
+        validate_nested_mcp_schema(content)?;
         toml::from_str(content).map_err(|error| safe_toml_parse_error(&error))
     }
 
@@ -268,11 +275,11 @@ impl PluginManifest {
         }
 
         let manifest_bytes = read_manifest_bytes(path)?;
-        let mut manifest: Self = toml::from_str(
-            std::str::from_utf8(&manifest_bytes)
-                .map_err(|_| "plugin.toml must be valid UTF-8".to_string())?,
-        )
-        .map_err(|error| safe_toml_parse_error(&error))?;
+        let manifest_text = std::str::from_utf8(&manifest_bytes)
+            .map_err(|_| "plugin.toml must be valid UTF-8".to_string())?;
+        validate_nested_mcp_schema(manifest_text)?;
+        let mut manifest: Self =
+            toml::from_str(manifest_text).map_err(|error| safe_toml_parse_error(&error))?;
         let warnings = if manifest.schema_version == 0 {
             let mut warnings = vec![format!(
                 "legacy manifest: add `schema_version = {CURRENT_SCHEMA_VERSION}`"
@@ -332,8 +339,31 @@ impl PluginManifest {
         validate_optional_text("author", self.plugin.author.as_deref(), 256)?;
         validate_unique_texts("filesystem root", &self.capabilities.filesystem_roots, 512)?;
         validate_unique_texts("network host", &self.capabilities.network_hosts, 253)?;
-        for host in &self.capabilities.network_hosts {
-            validate_network_host(host)?;
+        let declared_network_hosts = self
+            .capabilities
+            .network_hosts
+            .iter()
+            .map(|host| normalize_network_host(host))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let remote_network_hosts = self
+            .mcp_servers
+            .as_ref()
+            .into_iter()
+            .flat_map(|servers| servers.values())
+            .filter_map(|server| server.url.as_deref())
+            .map(|url| {
+                reqwest::Url::parse(url)
+                    .map_err(|_| "remote MCP URL is invalid".to_string())?
+                    .host_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "remote MCP URL is missing a host".to_string())
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if declared_network_hosts != remote_network_hosts {
+            return Err(
+                "capabilities.network_hosts must exactly match the normalized host set of all remote MCP endpoints"
+                    .to_string(),
+            );
         }
         if let Some(when) = &self.when {
             if let Some(os_values) = &when.os {
@@ -387,14 +417,88 @@ impl PluginManifest {
         }
         for (name, server) in servers {
             validate_component_name("MCP server", name)?;
+            if server.args.len() > MAX_MCP_ARGS {
+                return Err(format!(
+                    "MCP server `{name}` declares too many arguments; maximum is {MAX_MCP_ARGS}"
+                ));
+            }
+            if server.env.len() > MAX_MCP_ENV {
+                return Err(format!(
+                    "MCP server `{name}` declares too many environment mappings; maximum is {MAX_MCP_ENV}"
+                ));
+            }
+            if server.env_headers.len() > MAX_MCP_HEADERS {
+                return Err(format!(
+                    "MCP server `{name}` declares too many environment-backed headers; maximum is {MAX_MCP_HEADERS}"
+                ));
+            }
+            if server.scopes.len() > MAX_MCP_SCOPES {
+                return Err(format!(
+                    "MCP server `{name}` declares too many OAuth scopes; maximum is {MAX_MCP_SCOPES}"
+                ));
+            }
+            if server.enabled_tools.len() > MAX_MCP_TOOL_FILTERS
+                || server.disabled_tools.len() > MAX_MCP_TOOL_FILTERS
+            {
+                return Err(format!(
+                    "MCP server `{name}` declares too many tool filters; maximum is {MAX_MCP_TOOL_FILTERS} per list"
+                ));
+            }
+            for (label, timeout) in [
+                ("connect_timeout", server.connect_timeout),
+                ("execute_timeout", server.execute_timeout),
+                ("read_timeout", server.read_timeout),
+            ] {
+                if timeout.is_some_and(|seconds| !(1..=MAX_MCP_TIMEOUT_SECS).contains(&seconds)) {
+                    return Err(format!(
+                        "MCP server `{name}` {label} must be 1-{MAX_MCP_TIMEOUT_SECS} seconds"
+                    ));
+                }
+            }
+            if server.required && !server.enabled {
+                return Err(format!(
+                    "MCP server `{name}` cannot be required while disabled"
+                ));
+            }
             for arg in &server.args {
                 validate_text("MCP argument", arg, 4_096)?;
+            }
+            validate_unique_texts("enabled MCP tool", &server.enabled_tools, 256)?;
+            validate_unique_texts("disabled MCP tool", &server.disabled_tools, 256)?;
+            if server.enabled_tools.iter().any(|tool| {
+                server
+                    .disabled_tools
+                    .iter()
+                    .any(|disabled| disabled == tool)
+            }) {
+                return Err(format!(
+                    "MCP server `{name}` declares a tool in both enabled_tools and disabled_tools"
+                ));
             }
             match (server.command.as_deref(), server.url.as_deref()) {
                 (Some(command), None) => {
                     validate_text("MCP command", command, 512)?;
+                    if server.transport.is_some()
+                        || !server.headers.is_empty()
+                        || !server.env_headers.is_empty()
+                        || server.bearer_token_env_var.is_some()
+                        || !server.scopes.is_empty()
+                        || server.oauth.is_some()
+                        || server.oauth_resource.is_some()
+                    {
+                        return Err(format!(
+                            "stdio MCP server `{name}` may not declare remote transport or authentication fields"
+                        ));
+                    }
                     if command.contains('/') || command.contains('\\') {
-                        resolve_contained_path(root, command, "MCP command")?;
+                        let resolved = resolve_contained_path(root, command, "MCP command")?;
+                        if !resolved.is_file() {
+                            return Err(format!(
+                                "MCP server `{name}` command is not a regular file"
+                            ));
+                        }
+                    } else {
+                        validate_bare_executable(command)?;
                     }
                     if let Some(cwd) = server.cwd.as_deref() {
                         let raw = cwd.to_string_lossy();
@@ -424,6 +528,15 @@ impl PluginManifest {
                             ));
                         }
                     }
+                    for (destination, source) in &server.env {
+                        validate_environment_name("MCP environment destination", destination)?;
+                        let source = exact_environment_placeholder(source).ok_or_else(|| {
+                            format!(
+                                "MCP server `{name}` environment values must be exact `${{SOURCE_ENV}}` references"
+                            )
+                        })?;
+                        validate_environment_name("MCP environment source", source)?;
+                    }
                 }
                 (None, Some(url)) => {
                     let parsed = reqwest::Url::parse(url)
@@ -433,13 +546,61 @@ impl PluginManifest {
                             "MCP server `{name}` URL must use http or https and include a host"
                         ));
                     }
+                    if parsed.scheme() == "http"
+                        && !parsed.host_str().is_some_and(|host| {
+                            host.eq_ignore_ascii_case("localhost")
+                                || host
+                                    .parse::<std::net::IpAddr>()
+                                    .is_ok_and(|address| address.is_loopback())
+                        })
+                    {
+                        return Err(format!(
+                            "MCP server `{name}` URL must use HTTPS unless it targets loopback"
+                        ));
+                    }
                     if !parsed.username().is_empty() || parsed.password().is_some() {
                         return Err(format!(
                             "MCP server `{name}` URL must not embed credentials; use environment-backed authentication"
                         ));
                     }
-                    if server.cwd.is_some() {
-                        return Err(format!("remote MCP server `{name}` may not declare cwd"));
+                    if parsed.query().is_some() || parsed.fragment().is_some() {
+                        return Err(format!(
+                            "MCP server `{name}` URL may not contain a query or fragment"
+                        ));
+                    }
+                    if server.cwd.is_some() || !server.args.is_empty() || !server.env.is_empty() {
+                        return Err(format!(
+                            "remote MCP server `{name}` may not declare stdio cwd, args, or env"
+                        ));
+                    }
+                    if !server.headers.is_empty() {
+                        return Err(format!(
+                            "remote MCP server `{name}` may not contain literal headers; use env_headers or bearer_token_env_var"
+                        ));
+                    }
+                    if let Some(transport) = server.transport.as_deref() {
+                        validate_text("MCP transport", transport, 32)?;
+                        if !transport.eq_ignore_ascii_case("sse") {
+                            return Err(format!(
+                                "MCP server `{name}` transport must be `sse` when explicitly set"
+                            ));
+                        }
+                    }
+                    for (header, env_var) in &server.env_headers {
+                        validate_http_header_name(header)?;
+                        validate_environment_name("MCP header environment source", env_var)?;
+                    }
+                    if let Some(env_var) = server.bearer_token_env_var.as_deref() {
+                        validate_environment_name("MCP bearer environment source", env_var)?;
+                    }
+                    validate_unique_texts("OAuth scope", &server.scopes, 256)?;
+                    if let Some(oauth) = &server.oauth
+                        && let Some(client_id) = oauth.client_id.as_deref()
+                    {
+                        validate_text("OAuth client id", client_id, 512)?;
+                    }
+                    if let Some(resource) = server.oauth_resource.as_deref() {
+                        validate_safe_oauth_resource(resource)?;
                     }
                 }
                 (Some(_), Some(_)) => {
@@ -640,7 +801,19 @@ fn validate_text(field: &str, value: &str, max_chars: usize) -> Result<(), Strin
     if value.chars().any(char::is_control) {
         return Err(format!("{field} may not contain control characters"));
     }
+    if value.chars().any(is_bidi_control) {
+        return Err(format!(
+            "{field} may not contain bidirectional formatting characters"
+        ));
+    }
     Ok(())
+}
+
+fn is_bidi_control(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 fn validate_unique_texts(field: &str, values: &[String], max_chars: usize) -> Result<(), String> {
@@ -660,7 +833,7 @@ fn validate_unique_texts(field: &str, values: &[String], max_chars: usize) -> Re
     Ok(())
 }
 
-fn validate_network_host(host: &str) -> Result<(), String> {
+fn normalize_network_host(host: &str) -> Result<String, String> {
     if host.contains("://") || host.contains('/') || host.contains('\\') {
         return Err(format!(
             "network host `{host}` must be a host name, not a URL or path"
@@ -668,8 +841,133 @@ fn validate_network_host(host: &str) -> Result<(), String> {
     }
     let parsed = reqwest::Url::parse(&format!("https://{host}"))
         .map_err(|e| format!("network host `{host}` is invalid: {e}"))?;
-    if parsed.host_str().is_none() {
-        return Err(format!("network host `{host}` is invalid"));
+    if parsed.port().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(format!(
+            "network host `{host}` must contain only a normalized host name"
+        ));
+    }
+    parsed
+        .host_str()
+        .map(|host| host.to_ascii_lowercase())
+        .ok_or_else(|| format!("network host `{host}` is invalid"))
+}
+
+fn validate_bare_executable(command: &str) -> Result<(), String> {
+    if command.len() <= 128
+        && command
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '+'))
+        && !matches!(command, "." | "..")
+    {
+        Ok(())
+    } else {
+        Err("MCP command must be a bare executable name or a contained plugin path".to_string())
+    }
+}
+
+fn validate_environment_name(field: &str, value: &str) -> Result<(), String> {
+    validate_text(field, value, 128)?;
+    if value
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{field} must be an ASCII environment variable name"
+        ))
+    }
+}
+
+fn exact_environment_placeholder(value: &str) -> Option<&str> {
+    value.strip_prefix("${")?.strip_suffix('}')
+}
+
+fn validate_http_header_name(name: &str) -> Result<(), String> {
+    validate_text("MCP HTTP header name", name, 128)?;
+    reqwest::header::HeaderName::from_bytes(name.as_bytes())
+        .map(|_| ())
+        .map_err(|_| "MCP HTTP header name is invalid".to_string())
+}
+
+fn validate_safe_oauth_resource(resource: &str) -> Result<(), String> {
+    validate_text("OAuth resource", resource, 2_048)?;
+    let parsed = reqwest::Url::parse(resource)
+        .map_err(|_| "OAuth resource must be an absolute HTTPS URL".to_string())?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(
+            "OAuth resource must be an HTTPS URL without credentials, query, or fragment"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_nested_mcp_schema(content: &str) -> Result<(), String> {
+    const SERVER_FIELDS: &[&str] = &[
+        "command",
+        "args",
+        "env",
+        "cwd",
+        "url",
+        "transport",
+        "connect_timeout",
+        "execute_timeout",
+        "read_timeout",
+        "enabled",
+        "required",
+        "enabled_tools",
+        "disabled_tools",
+        "headers",
+        "env_headers",
+        "env_http_headers",
+        "bearer_token_env_var",
+        "scopes",
+        "oauth",
+        "oauth_resource",
+    ];
+    let value: toml::Value =
+        toml::from_str(content).map_err(|error| safe_toml_parse_error(&error))?;
+    let Some(servers) = value.get("mcp_servers") else {
+        return Ok(());
+    };
+    let servers = servers
+        .as_table()
+        .ok_or_else(|| "mcp_servers must be a table".to_string())?;
+    for server in servers.values() {
+        let server = server
+            .as_table()
+            .ok_or_else(|| "each MCP server must be a table".to_string())?;
+        if server
+            .keys()
+            .any(|field| !SERVER_FIELDS.contains(&field.as_str()))
+        {
+            return Err("plugin MCP server contains an unsupported field".to_string());
+        }
+        if let Some(oauth) = server.get("oauth") {
+            let oauth = oauth
+                .as_table()
+                .ok_or_else(|| "plugin MCP oauth must be a table".to_string())?;
+            if oauth.keys().any(|field| field != "client_id") {
+                return Err("plugin MCP oauth contains an unsupported field".to_string());
+            }
+        }
     }
     Ok(())
 }
@@ -833,18 +1131,25 @@ fn hash_path(
 fn hash_permissions(metadata: &fs::Metadata, hasher: &mut Sha256) {
     use std::os::unix::fs::PermissionsExt;
 
-    hasher.update(b"unix-mode\0");
-    hasher.update((metadata.permissions().mode() & 0o7777).to_le_bytes());
+    // Runtime snapshots deliberately remove group/other access and write bits.
+    // Bind identity only to whether a regular file is executable, so the
+    // owner-only staged representation has the same reviewed content hash.
+    hasher.update(b"unix-executable\0");
+    hasher.update([u8::from(
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+    )]);
 }
 
 #[cfg(not(unix))]
 fn hash_permissions(metadata: &fs::Metadata, hasher: &mut Sha256) {
-    hasher.update(b"readonly\0");
-    hasher.update([u8::from(metadata.permissions().readonly())]);
+    let _ = metadata;
+    // Windows staging marks files read-only as a defense-in-depth hardening
+    // step; that representation change is not plugin content identity.
+    hasher.update(b"portable-mode\0");
 }
 
 #[cfg(unix)]
-fn open_bundle_file(path: &Path) -> std::io::Result<fs::File> {
+pub(crate) fn open_bundle_file(path: &Path) -> std::io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
 
     fs::OpenOptions::new()
@@ -854,7 +1159,7 @@ fn open_bundle_file(path: &Path) -> std::io::Result<fs::File> {
 }
 
 #[cfg(not(unix))]
-fn open_bundle_file(path: &Path) -> std::io::Result<fs::File> {
+pub(crate) fn open_bundle_file(path: &Path) -> std::io::Result<fs::File> {
     fs::File::open(path)
 }
 
@@ -1112,5 +1417,83 @@ mod tests {
                 .unsupported_labels()
                 .contains(&"filesystem-roots")
         );
+    }
+
+    #[test]
+    fn plugin_mcp_schema_and_transport_combinations_fail_closed() {
+        let invalid = [
+            "\n[mcp_servers.remote]\nurl = \"https://example.invalid/mcp\"\nunknown_nested = true\n[capabilities]\nnetwork_hosts = [\"example.invalid\"]\n",
+            "\n[mcp_servers.remote]\nurl = \"https://example.invalid/mcp\"\nargs = [\"secret\"]\n[capabilities]\nnetwork_hosts = [\"example.invalid\"]\n",
+            "\n[mcp_servers.remote]\nurl = \"https://example.invalid/mcp?token=secret\"\n[capabilities]\nnetwork_hosts = [\"example.invalid\"]\n",
+            "\n[mcp_servers.remote]\nurl = \"http://example.invalid/mcp\"\n[capabilities]\nnetwork_hosts = [\"example.invalid\"]\n",
+            "\n[mcp_servers.remote]\nurl = \"https://example.invalid/mcp\"\n[capabilities]\nnetwork_hosts = [\"other.invalid\"]\n",
+            "\n[mcp_servers.local]\ncommand = \"node\"\ntransport = \"sse\"\n",
+            "\n[mcp_servers.local]\ncommand = \"node\"\nconnect_timeout = 0\n",
+            "\n[mcp_servers.local]\ncommand = \"node\"\nenabled_tools = [\"same\"]\ndisabled_tools = [\"same\"]\n",
+            "\n[mcp_servers.local]\ncommand = \"node\"\n[mcp_servers.local.env]\nTOKEN = \"literal-secret\"\n",
+            "\n[mcp_servers.remote]\nurl = \"https://example.invalid/mcp\"\n[mcp_servers.remote.headers]\nAuthorization = \"literal-secret\"\n[capabilities]\nnetwork_hosts = [\"example.invalid\"]\n",
+            "\n[mcp_servers.remote]\nurl = \"https://example.invalid/mcp\"\n[mcp_servers.remote.oauth]\nclient_id = \"public\"\nsecret = \"must-not-parse\"\n[capabilities]\nnetwork_hosts = [\"example.invalid\"]\n",
+        ];
+        for extra in invalid {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = write_manifest(tmp.path(), extra);
+            assert!(
+                PluginManifest::validate_from_path(&path).is_err(),
+                "accepted invalid plugin MCP manifest: {extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_mcp_remote_allowlist_and_env_provenance_are_exact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_manifest(
+            tmp.path(),
+            r#"
+[mcp_servers.remote]
+url = "https://Example.Invalid:8443/mcp/v1"
+transport = "sse"
+connect_timeout = 30
+execute_timeout = 120
+read_timeout = 180
+required = true
+enabled_tools = ["read"]
+disabled_tools = ["write"]
+bearer_token_env_var = "PLUGIN_BEARER"
+scopes = ["tools.read"]
+oauth_resource = "https://resource.invalid/mcp"
+
+[mcp_servers.remote.env_headers]
+X_Api_Key = "PLUGIN_API_KEY"
+
+[mcp_servers.remote.oauth]
+client_id = "public-client-id"
+
+[capabilities]
+network_hosts = ["example.invalid"]
+"#,
+        );
+        let validated = PluginManifest::validate_from_path(&path).unwrap();
+        assert_eq!(
+            validated.inventory.network_hosts,
+            vec!["example.invalid".to_string()]
+        );
+        assert_eq!(validated.inventory.remote_mcp_servers, 1);
+    }
+
+    #[test]
+    fn manifest_text_rejects_controls_and_bidirectional_spoofing() {
+        for unsafe_text in ["line\nbreak", "safe\u{202e}lmot.nigulp"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("plugin.toml");
+            fs::write(
+                &path,
+                format!(
+                    "schema_version = 1\n[plugin]\nname = \"safe\"\nversion = \"1.0.0\"\nauthor = {unsafe_text:?}\n"
+                ),
+            )
+            .unwrap();
+            assert!(PluginManifest::validate_from_path(&path).is_err());
+        }
     }
 }

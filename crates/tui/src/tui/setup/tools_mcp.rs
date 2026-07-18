@@ -487,22 +487,12 @@ fn plugins_inventory(app: &App, config: &Config, codewhale_home: &Path) -> Inven
     let plugins_dir = plugins_dir_for(app, config, codewhale_home);
     let path = display_path(&plugins_dir);
 
-    // Manifest-based plugins (plugin.toml) — prefer live registry when init'd.
-    let live_counts = crate::plugins::registry_workspace()
-        .filter(|workspace| workspace == &app.workspace)
-        .and_then(|_| {
-            crate::plugins::try_with_registry(|registry| {
-                let list = registry.list();
-                let total = list.len();
-                let active = list.iter().filter(|plugin| plugin.active()).count();
-                (total, active)
-            })
-        });
-    let (manifest_total, manifest_active) = if let Some(counts) = live_counts {
-        counts
-    } else {
-        count_manifest_plugins(&plugins_dir)
-    };
+    // Manifest-based plugins (plugin.toml) are owned by this App's immutable,
+    // workspace-scoped registry snapshot. Never consult process-global state:
+    // concurrent sessions may be rooted in different workspaces.
+    let list = app.plugin_registry.list();
+    let manifest_total = list.len();
+    let manifest_active = list.iter().filter(|plugin| plugin.active()).count();
 
     // Script plugins under [tools].plugin_dir (distinct from slash commands;
     // Hotbar Plugin source remains deferred/exploratory).
@@ -607,22 +597,6 @@ fn count_skill_dirs(dir: &Path) -> usize {
                 .count()
         })
         .unwrap_or(0)
-}
-
-fn count_manifest_plugins(dir: &Path) -> (usize, usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return (0, 0);
-    };
-    let mut total = 0usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() && path.join("plugin.toml").is_file() {
-            total += 1;
-        }
-    }
-    // A directory count cannot prove trust. All bundles are inactive unless
-    // the live, workspace-matched registry says otherwise.
-    (total, 0)
 }
 
 #[cfg(test)]

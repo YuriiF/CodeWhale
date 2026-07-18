@@ -109,9 +109,15 @@ fn expanded_mcp_stdio_env(config: &McpServerConfig) -> Result<HashMap<String, St
 /// stdio spawn path, without constructing or starting a process.
 fn mcp_stdio_child_env(config: &McpServerConfig) -> Result<Vec<(OsString, OsString)>> {
     let expanded_env = expanded_mcp_stdio_env(config)?;
-    Ok(crate::child_env::sanitized_mcp_env(
-        crate::child_env::string_map_env(&expanded_env),
-    ))
+    let overrides = crate::child_env::string_map_env(&expanded_env);
+    Ok(if config.reviewed_plugin.is_some() {
+        // Plugin reviews name every extra environment source explicitly. Do
+        // not silently widen that consent to the compatibility-oriented MCP
+        // bootstrap namespace (for example NPM_CONFIG_*).
+        crate::child_env::sanitized_plugin_mcp_env(overrides)
+    } else {
+        crate::child_env::sanitized_mcp_env(overrides)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,6 +296,10 @@ fn mask_url_secrets(url: &str) -> String {
             let _ = clone.set_username("***");
             let _ = clone.set_password(Some("***"));
         }
+        if parsed.query().is_some() {
+            clone.set_query(Some("***"));
+        }
+        clone.set_fragment(None);
         return clone.to_string();
     }
     url.to_string()
@@ -329,46 +339,96 @@ fn redact_proxy_userinfo(proxy_url: &str) -> String {
     }
 }
 
-/// Mask any obvious token-like substrings in a body excerpt before surfacing
-/// it. Conservative: replaces `Bearer <token>` and `api_key=...` shapes.
+fn redact_values_after_ascii_needle(
+    output: &mut String,
+    needle: &str,
+    terminates: impl Fn(char) -> bool,
+) {
+    let needle = needle.as_bytes();
+    let mut search_from = 0_usize;
+    while search_from.saturating_add(needle.len()) <= output.len() {
+        let Some(relative) = output.as_bytes()[search_from..]
+            .windows(needle.len())
+            .position(|candidate| candidate.eq_ignore_ascii_case(needle))
+        else {
+            break;
+        };
+        let value_start = search_from + relative + needle.len();
+        let value_end = output[value_start..]
+            .char_indices()
+            .find(|(_, ch)| terminates(*ch))
+            .map_or(output.len(), |(offset, _)| value_start + offset);
+        if value_end == value_start {
+            if value_start == output.len() {
+                break;
+            }
+            // The empty value is already safe. Advance over its ASCII
+            // separator so a second occurrence later in the body is found.
+            search_from = value_start + 1;
+            continue;
+        }
+        output.replace_range(value_start..value_end, "***");
+        search_from = value_start + 3;
+    }
+}
+
+/// Mask obvious token-like substrings in a body excerpt before surfacing it.
+/// Every occurrence is replaced, not only the first one.
 fn redact_body_preview(body: &str) -> String {
     let mut out = body.to_string();
-    if let Some(idx) = out.to_lowercase().find("bearer ") {
-        let tail_start = idx + "bearer ".len();
-        if tail_start < out.len() {
-            let end = out[tail_start..]
-                .find(|c: char| c.is_whitespace() || c == '"' || c == ',')
-                .map_or(out.len(), |off| tail_start + off);
-            out.replace_range(tail_start..end, "***");
-        }
-    }
+    redact_values_after_ascii_needle(&mut out, "bearer ", |ch| {
+        ch.is_whitespace() || ch == '"' || ch == ','
+    });
     for needle in ["api_key=", "apikey=", "api-key=", "token="] {
-        if let Some(idx) = out.to_lowercase().find(needle) {
-            let tail_start = idx + needle.len();
-            let end = out[tail_start..]
-                .find(|c: char| c.is_whitespace() || c == '&' || c == '"' || c == ',')
-                .map_or(out.len(), |off| tail_start + off);
-            out.replace_range(tail_start..end, "***");
-        }
+        redact_values_after_ascii_needle(&mut out, needle, |ch| {
+            ch.is_whitespace() || ch == '&' || ch == '"' || ch == ','
+        });
     }
     out
 }
 
-/// Read up to `max_bytes` of a reqwest Response body and produce a single-line
-/// excerpt suitable for an error message. Best-effort — if the body can't be
-/// read, returns the literal string `<no body>`.
+/// Read at most `max_bytes` of a reqwest response body and produce a
+/// single-line excerpt suitable for an error message. The stream is dropped as
+/// soon as the cap is reached, so an unbounded or never-ending error response
+/// cannot make diagnostics retain the entire body. Best-effort — if the body
+/// can't be read, returns the literal string `<no body>`.
 async fn bounded_body_excerpt(response: reqwest::Response, max_bytes: usize) -> String {
-    let body_text = response.text().await.unwrap_or_default();
-    if body_text.is_empty() {
+    use futures_util::StreamExt;
+
+    let declared_truncated = response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64);
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::with_capacity(max_bytes.min(8 * 1024));
+    let mut truncated = declared_truncated;
+
+    while body.len() < max_bytes {
+        let Some(chunk) = stream.next().await else {
+            break;
+        };
+        let Ok(chunk) = chunk else {
+            break;
+        };
+        let remaining = max_bytes - body.len();
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+        if body.len() == max_bytes {
+            // For a chunked response there is no length that proves EOF. Stop
+            // now rather than polling an attacker-controlled stream again.
+            truncated = true;
+        }
+    }
+
+    if body.is_empty() {
         return "<no body>".to_string();
     }
-    let trimmed: String = body_text.chars().take(max_bytes).collect();
-    let suffix = if body_text.len() > trimmed.len() {
-        "…"
-    } else {
-        ""
-    };
-    let one_line = trimmed.replace(['\n', '\r'], " ");
+
+    let one_line = String::from_utf8_lossy(&body).replace(['\n', '\r'], " ");
+    let suffix = if truncated { "…" } else { "" };
     format!("{}{}", redact_body_preview(&one_line), suffix)
 }
 
@@ -525,46 +585,93 @@ pub struct McpServerConfig {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ReviewedPluginMcpSource {
-    plugin_name: String,
-    manifest_path: PathBuf,
-    content_hash: String,
-    capability_hash: String,
+    authority: crate::plugins::types::PluginAuthority,
+    approved_remote_endpoint: Option<String>,
+    approved_remote_origin: Option<String>,
 }
 
 impl ReviewedPluginMcpSource {
-    fn from_plugin(plugin: &crate::plugins::types::LoadedPlugin) -> Self {
-        Self {
-            plugin_name: plugin.name().to_string(),
-            manifest_path: plugin.canonical_root.join("plugin.toml"),
-            content_hash: plugin.content_hash.clone(),
-            capability_hash: plugin.capability_hash.clone(),
-        }
+    fn from_authority(
+        authority: crate::plugins::types::PluginAuthority,
+        remote_endpoint: Option<&str>,
+    ) -> Result<Self> {
+        let (approved_remote_endpoint, approved_remote_origin) = match remote_endpoint {
+            Some(endpoint) => reviewed_remote_endpoint_identity(endpoint)
+                .map(|(endpoint, origin)| (Some(endpoint), Some(origin)))?,
+            None => (None, None),
+        };
+        Ok(Self {
+            authority,
+            approved_remote_endpoint,
+            approved_remote_origin,
+        })
     }
 
     pub(crate) fn validate_before_stdio_spawn(&self, server_name: &str) -> Result<()> {
+        self.validate_before_use(server_name, "spawn")
+    }
+
+    fn validate_before_use(&self, server_name: &str, operation: &str) -> Result<()> {
         let remediation = format!(
             "Run `/plugin reload`, inspect `/plugin show {0}`, then repeat the displayed trust command and `/plugin enable {0}` before retrying",
-            self.plugin_name
+            self.authority.plugin_name
         );
-        let current = crate::plugins::manifest::PluginManifest::validate_from_path(
-            &self.manifest_path,
-        )
-        .map_err(|error| {
+        crate::plugins::registry::verify_plugin_authority(&self.authority).map_err(|reason| {
             anyhow::anyhow!(
-                "Refusing to spawn MCP server '{server_name}': plugin bundle `{}` could not be revalidated immediately before lazy spawn ({error}). {remediation}",
-                self.plugin_name
+                "Refusing to {operation} MCP server '{server_name}' from plugin bundle `{}`: {reason}. {remediation}",
+                self.authority.plugin_name
             )
-        })?;
-        if current.content_hash != self.content_hash
-            || current.capability_hash != self.capability_hash
+        })
+    }
+
+    fn validate_remote_endpoint(&self, server_name: &str, endpoint: &str) -> Result<()> {
+        let (endpoint, origin) = reviewed_remote_endpoint_identity(endpoint)?;
+        if self.approved_remote_endpoint.as_deref() != Some(endpoint.as_str())
+            || self.approved_remote_origin.as_deref() != Some(origin.as_str())
         {
             anyhow::bail!(
-                "Refusing to spawn MCP server '{server_name}': plugin bundle `{}` changed after its trust review or MCP pool construction. {remediation}",
-                self.plugin_name
+                "Refusing MCP server '{server_name}': its remote endpoint no longer matches the reviewed plugin origin"
             );
         }
         Ok(())
     }
+
+    fn state_is_current(&self) -> bool {
+        crate::plugins::registry::verify_plugin_state_authority(&self.authority).is_ok()
+    }
+}
+
+fn reviewed_remote_endpoint_identity(endpoint: &str) -> Result<(String, String)> {
+    let endpoint =
+        reqwest::Url::parse(endpoint).context("reviewed plugin MCP endpoint is invalid")?;
+    if !endpoint.username().is_empty() || endpoint.password().is_some() {
+        anyhow::bail!("reviewed plugin MCP endpoint must not contain user information");
+    }
+    if endpoint.query().is_some() || endpoint.fragment().is_some() {
+        anyhow::bail!("reviewed plugin MCP endpoint must not contain a query or fragment");
+    }
+    let origin = reviewed_remote_origin(&endpoint)
+        .ok_or_else(|| anyhow::anyhow!("reviewed plugin MCP endpoint has an unsafe origin"))?;
+    Ok((endpoint.to_string(), origin))
+}
+
+fn reviewed_remote_origin(endpoint: &reqwest::Url) -> Option<String> {
+    if !endpoint.username().is_empty() || endpoint.password().is_some() {
+        return None;
+    }
+    let host = endpoint.host_str()?;
+    let allowed_scheme = endpoint.scheme() == "https"
+        || (endpoint.scheme() == "http"
+            && (host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())));
+    allowed_scheme.then(|| endpoint.origin().ascii_serialization())
+}
+
+fn reviewed_redirect_matches_origin(endpoint: &reqwest::Url, approved_origin: &str) -> bool {
+    reviewed_remote_origin(endpoint).as_deref() == Some(approved_origin)
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -721,8 +828,14 @@ impl McpServerCapabilities {
 fn response_result<'a>(
     response: &'a serde_json::Value,
     method: &str,
+    suppress_server_details: bool,
 ) -> Result<Option<&'a serde_json::Value>> {
     if let Some(error) = response.get("error") {
+        if suppress_server_details {
+            anyhow::bail!(
+                "Reviewed plugin MCP server returned an error in '{method}' (server details suppressed to protect environment-backed credentials)"
+            );
+        }
         anyhow::bail!("MCP error in '{method}': {error}");
     }
     Ok(response.get("result"))
@@ -792,6 +905,7 @@ struct McpHttpAuth {
     env_headers: HashMap<String, String>,
     bearer_token_env_var: Option<String>,
     oauth: Option<oauth::McpOAuthRuntime>,
+    suppress_server_error_details: bool,
 }
 
 impl McpHttpAuth {
@@ -801,6 +915,15 @@ impl McpHttpAuth {
             env_headers: config.env_headers.clone(),
             bearer_token_env_var: config.bearer_token_env_var.clone(),
             oauth,
+            suppress_server_error_details: config.reviewed_plugin.is_some(),
+        }
+    }
+
+    fn server_error_preview(&self, preview: &str) -> String {
+        if self.suppress_server_error_details {
+            "<server details suppressed for reviewed plugin>".to_string()
+        } else {
+            preview.to_string()
         }
     }
 
@@ -824,9 +947,19 @@ impl McpHttpAuth {
         }
         if !mcp_headers_have_authorization(&headers)
             && let Some(oauth) = &self.oauth
-            && let Some(value) = oauth.authorization_header().await?
         {
-            headers.insert("Authorization".to_string(), value);
+            let authorization = match oauth.authorization_header().await {
+                Ok(authorization) => authorization,
+                Err(_) if self.suppress_server_error_details => {
+                    anyhow::bail!(
+                        "Reviewed plugin MCP authentication failed (provider details suppressed)"
+                    )
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(value) = authorization {
+                headers.insert("Authorization".to_string(), value);
+            }
         }
         Ok(headers)
     }
@@ -899,21 +1032,35 @@ impl HttpTransport {
     ///   dedicated `SseTransport` and is triggered by the incompatible-
     ///   status fallback in [`HttpTransport::send`].
     async fn try_establish_session(&mut self) -> Result<()> {
+        let cancel = self.cancel_token.clone();
         let transport = match &mut self.mode {
             HttpTransportMode::Streamable(t) => t,
             // Already on SSE — session is implicit via the long-lived GET.
             HttpTransportMode::Sse(_) => return Ok(()),
         };
 
-        let headers = transport.auth.resolved_headers().await?;
+        let headers = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                anyhow::bail!("MCP session preflight cancelled after plugin authority changed")
+            }
+            headers = transport.auth.resolved_headers() => headers?,
+        };
         let request = apply_safe_custom_headers(
             with_default_mcp_http_headers(transport.client.get(&transport.url), false),
             &headers,
         );
-        let response = tokio::time::timeout(Duration::from_secs(5), request.send())
-            .await
-            .map_err(|_| anyhow::anyhow!("GET timeout"))?
-            .map_err(|e| anyhow::anyhow!("GET error: {e}"))?;
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                anyhow::bail!("MCP session preflight cancelled after plugin authority changed")
+            }
+            response = tokio::time::timeout(Duration::from_secs(5), request.send()) => {
+                response
+                    .map_err(|_| anyhow::anyhow!("GET timeout"))?
+                    .map_err(|e| anyhow::anyhow!("GET error: {e}"))?
+            }
+        };
 
         // Capture session ID from the GET response so subsequent POSTs
         // (including `initialize`) can include it. This is the same
@@ -1127,6 +1274,62 @@ pub struct McpConnection {
     discovery_timeout: Duration,
     read_timeout_secs: u64,
     cancel_token: tokio_util::sync::CancellationToken,
+    authority_revocation_reason: Arc<std::sync::Mutex<Option<String>>>,
+    authority_watch: Option<tokio::task::JoinHandle<()>>,
+}
+
+struct PendingAuthorityWatch {
+    handle: Option<tokio::task::JoinHandle<()>>,
+    cancel: tokio_util::sync::CancellationToken,
+    armed: bool,
+}
+
+impl PendingAuthorityWatch {
+    fn start(
+        source: ReviewedPluginMcpSource,
+        cancel: tokio_util::sync::CancellationToken,
+        reason_slot: Arc<std::sync::Mutex<Option<String>>>,
+    ) -> Self {
+        let task_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                if let Err(reason) =
+                    crate::plugins::registry::verify_plugin_state_authority(&source.authority)
+                {
+                    if let Ok(mut slot) = reason_slot.lock() {
+                        *slot = Some(reason);
+                    }
+                    task_cancel.cancel();
+                    break;
+                }
+                tokio::select! {
+                    _ = task_cancel.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
+            }
+        });
+        Self {
+            handle: Some(handle),
+            cancel,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) -> tokio::task::JoinHandle<()> {
+        self.armed = false;
+        self.handle.take().expect("authority watch must exist")
+    }
+}
+
+impl Drop for PendingAuthorityWatch {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancel.cancel();
+            if let Some(handle) = self.handle.take() {
+                handle.abort();
+            }
+        }
+    }
 }
 
 impl McpConnection {
@@ -1144,7 +1347,23 @@ impl McpConnection {
         let connect_timeout_secs = config.effective_connect_timeout(global_timeouts);
         let read_timeout_secs = config.effective_read_timeout(global_timeouts);
         let cancel_token = tokio_util::sync::CancellationToken::new();
-
+        let authority_revocation_reason = Arc::new(std::sync::Mutex::new(None));
+        if let Some(source) = config.reviewed_plugin.as_ref() {
+            source.validate_before_use(&name, "connect")?;
+            if let Some(url) = config.url.as_deref() {
+                source.validate_remote_endpoint(&name, url)?;
+            }
+        }
+        // Start the cross-process generation watch before any network request
+        // or child spawn. The guard cancels and aborts itself on every early
+        // return; a successful connection transfers the task into `Self`.
+        let authority_watch = config.reviewed_plugin.clone().map(|source| {
+            PendingAuthorityWatch::start(
+                source,
+                cancel_token.clone(),
+                Arc::clone(&authority_revocation_reason),
+            )
+        });
         let transport: Box<dyn McpTransport> = if let Some(url) = &config.url {
             // Per-domain network policy gate (#135). Only the HTTP/SSE transport
             // is gated; STDIO MCP servers run as local subprocesses and never
@@ -1184,6 +1403,23 @@ impl McpConnection {
             let mut client_builder = crate::tls::reqwest_client_builder()
                 .connect_timeout(Duration::from_secs(connect_timeout_secs))
                 .timeout(Duration::from_secs(read_timeout_secs));
+            if let Some(approved_origin) = config
+                .reviewed_plugin
+                .as_ref()
+                .and_then(|source| source.approved_remote_origin.clone())
+            {
+                client_builder =
+                    client_builder.redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                        if attempt.previous().len() >= 5 {
+                            return attempt.stop();
+                        }
+                        if reviewed_redirect_matches_origin(attempt.url(), &approved_origin) {
+                            attempt.follow()
+                        } else {
+                            attempt.stop()
+                        }
+                    }));
+            }
             let env_proxy_url = std::env::var("HTTPS_PROXY")
                 .or_else(|_| std::env::var("https_proxy"))
                 .or_else(|_| std::env::var("HTTP_PROXY"))
@@ -1217,31 +1453,56 @@ impl McpConnection {
                 &config.headers,
                 &config.env_headers,
             ) {
-                Ok(default_headers) => match oauth::McpOAuthRuntime::from_server_config(
-                    &name,
-                    &config,
-                    default_headers,
-                )
-                .await
-                {
-                    Ok(runtime) => runtime,
-                    Err(err) => {
+                Ok(default_headers) => {
+                    let prepared = tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            anyhow::bail!(
+                                "MCP OAuth setup cancelled after plugin authority changed"
+                            )
+                        }
+                        prepared = oauth::McpOAuthRuntime::from_server_config(
+                            &name,
+                            &config,
+                            default_headers,
+                        ) => prepared,
+                    };
+                    match prepared {
+                        Ok(runtime) => runtime,
+                        Err(err) => {
+                            if config.reviewed_plugin.is_some() {
+                                tracing::warn!(
+                                    target: "mcp",
+                                    server = %name,
+                                    "failed to prepare reviewed plugin MCP OAuth runtime; provider details suppressed; continuing without stored OAuth token"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    target: "mcp",
+                                    server = %name,
+                                    error = %err,
+                                    "failed to prepare MCP OAuth runtime; continuing without stored OAuth token"
+                                );
+                            }
+                            None
+                        }
+                    }
+                }
+                Err(err) => {
+                    if config.reviewed_plugin.is_some() {
+                        tracing::warn!(
+                            target: "mcp",
+                            server = %name,
+                            "failed to prepare reviewed plugin MCP OAuth headers; details suppressed; continuing without stored OAuth token"
+                        );
+                    } else {
                         tracing::warn!(
                             target: "mcp",
                             server = %name,
                             error = %err,
-                            "failed to prepare MCP OAuth runtime; continuing without stored OAuth token"
+                            "failed to prepare MCP OAuth default headers; continuing without stored OAuth token"
                         );
-                        None
                     }
-                },
-                Err(err) => {
-                    tracing::warn!(
-                        target: "mcp",
-                        server = %name,
-                        error = %err,
-                        "failed to prepare MCP OAuth default headers; continuing without stored OAuth token"
-                    );
                     None
                 }
             };
@@ -1281,10 +1542,23 @@ impl McpConnection {
                 Box::new(http)
             }
         } else if let Some(command) = &config.command {
-            Box::new(StdioTransport::spawn(&name, command, &config)?)
+            Box::new(StdioTransport::spawn(
+                &name,
+                command,
+                &config,
+                cancel_token.clone(),
+            )?)
         } else {
             anyhow::bail!("MCP server '{name}' config must have either 'command' or 'url'");
         };
+        // Revalidate after transport construction as well: remote setup may
+        // await DNS/TLS/SSE preflight, and a concurrent process can revoke the
+        // receipt during that interval. Initialization and catalog discovery
+        // never start under a stale generation.
+        if let Some(source) = config.reviewed_plugin.as_ref() {
+            source.validate_before_use(&name, "initialize")?;
+        }
+        let authority_watch = authority_watch.map(PendingAuthorityWatch::disarm);
 
         let mut conn = Self {
             name: name.clone(),
@@ -1300,6 +1574,8 @@ impl McpConnection {
             discovery_timeout: Duration::from_secs(connect_timeout_secs),
             read_timeout_secs,
             cancel_token,
+            authority_revocation_reason,
+            authority_watch,
         };
 
         // Initialize with timeout
@@ -1338,7 +1614,11 @@ impl McpConnection {
         .await?;
 
         let response = self.recv(init_id).await?;
-        response_result(&response, "initialize")?;
+        response_result(
+            &response,
+            "initialize",
+            self.config.reviewed_plugin.is_some(),
+        )?;
         self.server_capabilities = McpServerCapabilities::from_initialize_response(&response);
 
         // Send initialized notification (no id, no response expected)
@@ -1422,7 +1702,12 @@ impl McpConnection {
             .await?;
 
             let response = self.recv(list_id).await?;
-            let Some(result) = response_result(&response, "tools/list")? else {
+            let Some(result) = response_result(
+                &response,
+                "tools/list",
+                self.config.reviewed_plugin.is_some(),
+            )?
+            else {
                 break;
             };
 
@@ -1474,7 +1759,12 @@ impl McpConnection {
             .await?;
 
             let response = self.recv(list_id).await?;
-            let Some(result) = response_result(&response, "resources/list")? else {
+            let Some(result) = response_result(
+                &response,
+                "resources/list",
+                self.config.reviewed_plugin.is_some(),
+            )?
+            else {
                 break;
             };
 
@@ -1518,7 +1808,12 @@ impl McpConnection {
             .await?;
 
             let response = self.recv(list_id).await?;
-            let Some(result) = response_result(&response, "resources/templates/list")? else {
+            let Some(result) = response_result(
+                &response,
+                "resources/templates/list",
+                self.config.reviewed_plugin.is_some(),
+            )?
+            else {
                 break;
             };
 
@@ -1566,7 +1861,12 @@ impl McpConnection {
             .await?;
 
             let response = self.recv(list_id).await?;
-            let Some(result) = response_result(&response, "prompts/list")? else {
+            let Some(result) = response_result(
+                &response,
+                "prompts/list",
+                self.config.reviewed_plugin.is_some(),
+            )?
+            else {
                 break;
             };
 
@@ -1658,26 +1958,43 @@ impl McpConnection {
                 self.name
             );
         }
+        if let Some(source) = self.config.reviewed_plugin.as_ref() {
+            source.validate_before_use(&self.name, method)?;
+        }
 
         let call_id = self.next_id();
-        self.send(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": &call_id,
-            "method": method,
-            "params": params
-        }))
-        .await?;
-
-        let response = tokio::time::timeout(Duration::from_secs(timeout_secs), self.recv(call_id))
+        if let Err(error) = self
+            .send(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": &call_id,
+                "method": method,
+                "params": params
+            }))
             .await
-            .with_context(|| {
-                format!(
-                    "MCP method '{}' on server '{}' timed out after {}s",
-                    method, self.name, timeout_secs
-                )
-            })??;
+        {
+            return self.finish_guarded_error(error).await;
+        }
+
+        let response =
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), self.recv(call_id))
+                .await
+                .with_context(|| {
+                    format!(
+                        "MCP method '{}' on server '{}' timed out after {}s",
+                        method, self.name, timeout_secs
+                    )
+                }) {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => return self.finish_guarded_error(error).await,
+                Err(error) => return self.finish_guarded_error(error).await,
+            };
 
         if let Some(error) = response.get("error") {
+            if self.config.reviewed_plugin.is_some() {
+                anyhow::bail!(
+                    "Reviewed plugin MCP server returned an error in '{method}' (server details suppressed to protect environment-backed credentials)"
+                );
+            }
             return Err(anyhow::anyhow!(
                 "MCP error in '{}': {}",
                 method,
@@ -1719,7 +2036,7 @@ impl McpConnection {
 
     /// Check if connection is ready
     pub fn is_ready(&self) -> bool {
-        self.state == ConnectionState::Ready
+        self.state == ConnectionState::Ready && self.catalog_authorized()
     }
 
     /// Get server config
@@ -1739,14 +2056,29 @@ impl McpConnection {
 
     async fn send(&mut self, msg: serde_json::Value) -> Result<()> {
         let bytes = serde_json::to_vec(&msg).context("Failed to serialize MCP JSON-RPC message")?;
-        self.transport.send(bytes).await
+        tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => {
+                self.state = ConnectionState::Disconnected;
+                anyhow::bail!("MCP connection '{}' was cancelled", self.name)
+            }
+            result = self.transport.send(bytes) => result,
+        }
     }
 
     async fn recv(&mut self, expected_id: String) -> Result<serde_json::Value> {
         loop {
             let bytes = match tokio::time::timeout(
                 Duration::from_secs(self.read_timeout_secs),
-                self.transport.recv(),
+                async {
+                    tokio::select! {
+                        biased;
+                        _ = self.cancel_token.cancelled() => {
+                            anyhow::bail!("MCP connection '{}' was cancelled", self.name)
+                        }
+                        result = self.transport.recv() => result,
+                    }
+                },
             )
             .await
             {
@@ -1766,11 +2098,15 @@ impl McpConnection {
                 Ok(value) => value,
                 Err(err) => {
                     self.state = ConnectionState::Disconnected;
+                    let preview = if self.config.reviewed_plugin.is_some() {
+                        "<server details suppressed for reviewed plugin>".to_string()
+                    } else {
+                        invalid_json_preview(&bytes)
+                    };
                     return Err(err).with_context(|| {
                         format!(
                             "Invalid MCP JSON-RPC message from server '{}': {}",
-                            self.name,
-                            invalid_json_preview(&bytes)
+                            self.name, preview
                         )
                     });
                 }
@@ -1798,11 +2134,38 @@ impl McpConnection {
         self.cancel_token.cancel();
         self.state = ConnectionState::Disconnected;
     }
+
+    fn catalog_authorized(&self) -> bool {
+        self.config
+            .reviewed_plugin
+            .as_ref()
+            .is_none_or(ReviewedPluginMcpSource::state_is_current)
+    }
+
+    async fn finish_guarded_error<T>(&mut self, error: anyhow::Error) -> Result<T> {
+        let reason = self
+            .authority_revocation_reason
+            .lock()
+            .ok()
+            .and_then(|reason| reason.clone());
+        if let Some(reason) = reason {
+            self.transport.shutdown().await;
+            self.state = ConnectionState::Disconnected;
+            anyhow::bail!(
+                "MCP operation on plugin server '{}' was cancelled after authority changed: {reason}",
+                self.name
+            );
+        }
+        Err(error)
+    }
 }
 
 impl Drop for McpConnection {
     fn drop(&mut self) {
         self.cancel_token.cancel();
+        if let Some(watch) = self.authority_watch.take() {
+            watch.abort();
+        }
     }
 }
 
@@ -1819,6 +2182,7 @@ pub struct McpPool {
     /// either file appear or change.
     config_sources: Vec<PathBuf>,
     workspace: Option<PathBuf>,
+    plugin_registry: Option<Arc<crate::plugins::PluginRegistry>>,
     /// 64-bit content hash of the active config (`hash_mcp_config`). Compared
     /// against the freshly-loaded config after an mtime change to skip
     /// reloading when the file was merely touched.
@@ -1840,6 +2204,7 @@ impl McpPool {
             network_policy: None,
             config_sources: Vec::new(),
             workspace: None,
+            plugin_registry: None,
             config_hash,
             last_mtimes: Vec::new(),
             dynamic_servers: Arc::new(RwLock::new(HashMap::new())),
@@ -1863,7 +2228,19 @@ impl McpPool {
         path: &std::path::Path,
         workspace: &Path,
     ) -> Result<Self> {
-        let config = load_config_with_workspace(path, workspace)?;
+        let plugins = crate::plugins::registry_for_workspace(workspace);
+        Self::from_config_path_with_workspace_and_plugins(path, workspace, plugins)
+    }
+
+    pub fn from_config_path_with_workspace_and_plugins(
+        path: &std::path::Path,
+        workspace: &Path,
+        plugins: Arc<crate::plugins::PluginRegistry>,
+    ) -> Result<Self> {
+        if plugins.workspace() != workspace {
+            anyhow::bail!("plugin registry workspace does not match MCP pool workspace");
+        }
+        let config = load_config_with_workspace_and_plugins(path, workspace, plugins.as_ref())?;
         let workspace = checked_workspace_path(workspace)?;
         let mut pool = Self::new(config);
         pool.config_sources = vec![
@@ -1878,6 +2255,7 @@ impl McpPool {
             .map(|source| mcp_config_mtime(source))
             .collect();
         pool.workspace = Some(workspace);
+        pool.plugin_registry = Some(plugins);
         Ok(pool)
     }
 
@@ -1944,7 +2322,12 @@ impl McpPool {
             .first()
             .context("MCP config source list unexpectedly empty")?;
         let new_config = if let Some(workspace) = self.workspace.as_deref() {
-            load_config_with_workspace(primary, workspace)?
+            match self.plugin_registry.as_deref() {
+                Some(plugins) => {
+                    load_config_with_workspace_and_plugins(primary, workspace, plugins)?
+                }
+                None => load_config_with_workspace(primary, workspace)?,
+            }
         } else {
             load_config(primary)?
         };
@@ -1970,6 +2353,23 @@ impl McpPool {
         // propagated so a brief hiccup can't take down the whole tool dispatch.
         if let Err(e) = self.reload_if_config_changed().await {
             tracing::warn!("MCP config reload check failed: {e:#}");
+        }
+
+        let plugin_source = self
+            .connections
+            .get(server_name)
+            .and_then(|connection| connection.config().reviewed_plugin.clone())
+            .or_else(|| {
+                self.config
+                    .servers
+                    .get(server_name)
+                    .and_then(|config| config.reviewed_plugin.clone())
+            });
+        if let Some(source) = plugin_source
+            && let Err(error) = source.validate_before_use(server_name, "use")
+        {
+            self.drop_connection(server_name, "plugin authority revoked or changed");
+            return Err(error);
         }
 
         let is_ready = self
@@ -2052,6 +2452,9 @@ impl McpPool {
     pub fn all_tools(&self) -> Vec<(String, &McpTool)> {
         let mut tools = Vec::new();
         for (server, conn) in &self.connections {
+            if !conn.catalog_authorized() {
+                continue;
+            }
             for tool in conn.tools() {
                 if !conn.config().is_tool_enabled(&tool.name) {
                     continue;
@@ -2070,6 +2473,9 @@ impl McpPool {
     pub fn all_resources(&self) -> Vec<(String, &McpResource)> {
         let mut resources = Vec::new();
         for (server, conn) in &self.connections {
+            if !conn.catalog_authorized() {
+                continue;
+            }
             for resource in conn.resources() {
                 // Format: mcp_{server}_{resource_name}
                 // Note: resource names might contain spaces, we should probably slugify them
@@ -2085,6 +2491,9 @@ impl McpPool {
     pub fn all_resource_templates(&self) -> Vec<(String, &McpResourceTemplate)> {
         let mut templates = Vec::new();
         for (server, conn) in &self.connections {
+            if !conn.catalog_authorized() {
+                continue;
+            }
             for template in conn.resource_templates() {
                 let safe_name = template.name.replace(' ', "_").to_lowercase();
                 templates.push((format!("mcp_{server}_{safe_name}"), template));
@@ -2121,6 +2530,9 @@ impl McpPool {
             }
         }
         for (server, conn) in &self.connections {
+            if !conn.catalog_authorized() {
+                continue;
+            }
             for resource in conn.resources() {
                 items.push(serde_json::json!({
                     "server": server,
@@ -2167,6 +2579,9 @@ impl McpPool {
             }
         }
         for (server, conn) in &self.connections {
+            if !conn.catalog_authorized() {
+                continue;
+            }
             for template in conn.resource_templates() {
                 items.push(serde_json::json!({
                     "server": server,
@@ -2192,6 +2607,9 @@ impl McpPool {
     pub fn all_prompts(&self) -> Vec<(String, &McpPrompt)> {
         let mut prompts = Vec::new();
         for (server, conn) in &self.connections {
+            if !conn.catalog_authorized() {
+                continue;
+            }
             for prompt in conn.prompts() {
                 // Format: mcp_{server}_{prompt}
                 prompts.push((format!("mcp_{}_{}", server, prompt.name), prompt));
@@ -2682,66 +3100,79 @@ pub fn workspace_mcp_config_path(workspace: &Path) -> PathBuf {
 }
 
 pub fn load_config_with_workspace(global_path: &Path, workspace: &Path) -> Result<McpConfig> {
-    let plugins = crate::plugins::try_with_registry(|registry| {
-        registry
-            .active_plugins()
-            .into_iter()
-            .map(|plugin| (plugin.name().to_string(), plugin.clone()))
-            .collect::<Vec<_>>()
-    })
-    .unwrap_or_default();
-
-    load_config_with_workspace_from_plugins(global_path, workspace, plugins)
+    let plugins = crate::plugins::registry_for_workspace(workspace);
+    load_config_with_workspace_and_plugins(global_path, workspace, plugins.as_ref())
 }
 
-fn load_config_with_workspace_from_plugins(
+pub fn load_config_with_workspace_and_plugins(
     global_path: &Path,
     workspace: &Path,
-    plugins: impl IntoIterator<Item = (String, crate::plugins::types::LoadedPlugin)>,
+    plugins: &crate::plugins::PluginRegistry,
 ) -> Result<McpConfig> {
     let mut merged = load_config(global_path)?;
     let workspace = checked_workspace_path(workspace)?;
     let project_path = checked_workspace_mcp_config_path(&workspace)?;
-    let has_distinct_project_config =
-        project_path.exists() && !paths_refer_to_same_config(global_path, &project_path);
+    if !project_path.exists() || paths_refer_to_same_config(global_path, &project_path) {
+        return merge_plugin_mcp_servers(merged, plugins);
+    }
     // Workspace-local MCP can spawn stdio servers, so it is only honored after
     // the user has trusted this workspace in user-owned config. Do not accept
     // project-local legacy trust markers here: a repository could carry those
     // files itself and silently reintroduce the project-scope `mcp_config_path`
-    // risk denied in #417. User-owned plugin MCP remains independent of this
-    // project trust gate and is merged below on every path.
-    if has_distinct_project_config && workspace_allows_project_mcp_config(&workspace) {
-        let mut project = load_config(&project_path)?;
-        for server in project.servers.values_mut() {
-            if server.command.is_some() && server.url.is_none() {
-                server.cwd = Some(resolve_project_mcp_cwd(&workspace, server.cwd.as_deref())?);
-            }
-        }
-        merged.servers.extend(project.servers);
+    // risk denied in #417.
+    if !workspace_allows_project_mcp_config(&workspace) {
+        return merge_plugin_mcp_servers(merged, plugins);
     }
 
-    merge_plugin_mcp_servers_from_plugins(merged, plugins)
+    let mut project = load_config(&project_path)?;
+    for server in project.servers.values_mut() {
+        if server.command.is_some() && server.url.is_none() {
+            server.cwd = Some(resolve_project_mcp_cwd(&workspace, server.cwd.as_deref())?);
+        }
+    }
+    merged.servers.extend(project.servers);
+
+    merge_plugin_mcp_servers(merged, plugins)
+}
+
+fn merge_plugin_mcp_servers(
+    config: McpConfig,
+    registry: &crate::plugins::PluginRegistry,
+) -> Result<McpConfig> {
+    let Some(state_path) = registry.state_path().map(Path::to_path_buf) else {
+        return Ok(config);
+    };
+    let plugins = registry
+        .active_plugins()
+        .into_iter()
+        .filter_map(|plugin| {
+            plugin
+                .authority(state_path.clone(), registry.workspace().to_path_buf())
+                .map(|authority| (plugin.name().to_string(), plugin.clone(), authority))
+        })
+        .collect::<Vec<_>>();
+
+    merge_plugin_mcp_servers_from_plugins(config, plugins)
 }
 
 fn merge_plugin_mcp_servers_from_plugins(
     mut config: McpConfig,
-    plugins: impl IntoIterator<Item = (String, crate::plugins::types::LoadedPlugin)>,
+    plugins: impl IntoIterator<
+        Item = (
+            String,
+            crate::plugins::types::LoadedPlugin,
+            crate::plugins::types::PluginAuthority,
+        ),
+    >,
 ) -> Result<McpConfig> {
-    for (plugin_name, plugin) in plugins {
+    for (plugin_name, plugin, authority) in plugins {
         // Adapter-level denial keeps headless paths fail-closed even if a
         // future caller accidentally passes the full inventory instead of the
         // registry's active-only view.
         if !plugin.active() {
             continue;
         }
-        let snapshot_current = crate::plugins::manifest::PluginManifest::validate_from_path(
-            &plugin.canonical_root.join("plugin.toml"),
-        )
-        .is_ok_and(|current| {
-            current.content_hash == plugin.content_hash
-                && current.capability_hash == plugin.capability_hash
-        });
-        if !snapshot_current {
+        if crate::plugins::registry::verify_plugin_authority(&authority).is_err() {
             tracing::warn!(
                 target: "mcp",
                 plugin = %plugin_name,
@@ -2767,12 +3198,20 @@ fn merge_plugin_mcp_servers_from_plugins(
                 let mut server_config = server_config.clone();
 
                 if server_config.command.is_some() && server_config.url.is_none() {
+                    let staged_root = plugin
+                        .staged_root
+                        .as_deref()
+                        .context("active plugin is missing its runtime snapshot")?;
                     server_config.cwd = Some(resolve_plugin_mcp_cwd(
-                        &plugin.base_path,
+                        staged_root,
                         server_config.cwd.as_deref(),
                     )?);
+                    freeze_plugin_stdio_paths(&mut server_config, staged_root)?;
                 }
-                server_config.reviewed_plugin = Some(ReviewedPluginMcpSource::from_plugin(&plugin));
+                server_config.reviewed_plugin = Some(ReviewedPluginMcpSource::from_authority(
+                    authority.clone(),
+                    server_config.url.as_deref(),
+                )?);
 
                 config.servers.insert(qualified_name, server_config);
             }
@@ -2782,15 +3221,45 @@ fn merge_plugin_mcp_servers_from_plugins(
     Ok(config)
 }
 
+fn freeze_plugin_stdio_paths(config: &mut McpServerConfig, staged_root: &Path) -> Result<()> {
+    if let Some(command) = config.command.as_mut()
+        && (command.contains('/') || command.contains('\\'))
+    {
+        let frozen = resolve_plugin_mcp_cwd(staged_root, Some(Path::new(command)))?;
+        *command = frozen.display().to_string();
+    }
+    let runtime_cwd = config.cwd.as_deref().unwrap_or(staged_root).to_path_buf();
+    for argument in &mut config.args {
+        if argument.starts_with('-') || Path::new(argument).is_absolute() {
+            continue;
+        }
+        let candidate = normalize_path_components(&runtime_cwd.join(argument.as_str()));
+        if candidate.exists() {
+            let frozen = candidate
+                .canonicalize()
+                .context("failed to freeze reviewed plugin MCP argument path")?;
+            if !frozen.starts_with(staged_root) {
+                anyhow::bail!("reviewed plugin MCP argument path escaped its staged root");
+            }
+            *argument = frozen.display().to_string();
+        }
+    }
+    Ok(())
+}
+
 fn resolve_plugin_mcp_cwd(plugin_path: &Path, cwd: Option<&Path>) -> Result<PathBuf> {
     let cwd = match cwd {
         Some(cwd) if cwd.is_relative() => normalize_path_components(&plugin_path.join(cwd)),
         Some(cwd) => normalize_path_components(cwd),
         None => plugin_path.to_path_buf(),
     };
-    Ok(cwd
+    let resolved = cwd
         .canonicalize()
-        .unwrap_or_else(|_| normalize_path_components(&cwd)))
+        .unwrap_or_else(|_| normalize_path_components(&cwd));
+    if !resolved.starts_with(plugin_path) {
+        anyhow::bail!("reviewed plugin MCP path escaped its staged root");
+    }
+    Ok(resolved)
 }
 
 fn workspace_allows_project_mcp_config(workspace: &Path) -> bool {
