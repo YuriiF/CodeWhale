@@ -955,14 +955,19 @@ impl RuntimeThreadStore {
             // with ordinary write authority only on the failure path so the
             // success path remains an atomic append on every platform.
             drop(file);
-            let rollback_result =
-                OpenOptions::new()
+            let rollback_result = (|| -> Result<()> {
+                reject_symlinked_store_file(&path)?;
+                let rollback_file = OpenOptions::new()
                     .write(true)
                     .open(&path)
-                    .and_then(|rollback_file| {
-                        rollback_file.set_len(original_len)?;
-                        rollback_file.sync_all()
-                    });
+                    .with_context(|| format!("Failed to reopen {} for rollback", path.display()))?;
+                rollback_file
+                    .set_len(original_len)
+                    .with_context(|| format!("Failed to roll back {}", path.display()))?;
+                rollback_file
+                    .sync_all()
+                    .with_context(|| format!("Failed to sync rollback for {}", path.display()))
+            })();
             let error = match rollback_result {
                 Ok(()) => RuntimeEventAppendError {
                     disposition: EventAppendFailureDisposition::RolledBack,
