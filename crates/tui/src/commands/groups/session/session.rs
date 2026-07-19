@@ -664,6 +664,29 @@ mod tests {
                 cache_control: None,
             }],
         });
+        {
+            let mut todos = app.todos.try_lock().expect("todos lock");
+            todos.add(
+                "preserve fork Work".to_string(),
+                crate::tools::todo::TodoStatus::InProgress,
+            );
+        }
+        {
+            let mut plan = app.plan_state.try_lock().expect("plan lock");
+            plan.update(crate::tools::plan::UpdatePlanArgs {
+                objective: Some("Fork without Work drift".to_string()),
+                ..crate::tools::plan::UpdatePlanArgs::default()
+            });
+        }
+        app.cycle_effort();
+        let expected_work = app
+            .work_state_snapshot()
+            .expect("Work snapshot")
+            .expect("graph-backed Work state");
+        assert!(
+            expected_work.graph.is_some(),
+            "fork fixture must use a graph"
+        );
 
         let result = fork(&mut app);
 
@@ -696,6 +719,8 @@ mod tests {
             child.metadata.model_provider_id.as_deref(),
             Some("lm-studio")
         );
+        assert_eq!(parent.work_state.as_ref(), Some(&expected_work));
+        assert_eq!(child.work_state.as_ref(), Some(&expected_work));
         let cached_child = app
             .current_session_metadata
             .as_ref()
@@ -1238,6 +1263,22 @@ mod tests {
             content: "Hi there".to_string(),
             streaming: false,
         });
+        {
+            let mut todos = app.todos.try_lock().expect("todos lock");
+            todos.add(
+                "export must not mutate this".to_string(),
+                crate::tools::todo::TodoStatus::InProgress,
+            );
+        }
+        app.cycle_effort();
+        let work_before = app.work_state_snapshot().expect("Work snapshot");
+        assert!(
+            work_before
+                .as_ref()
+                .and_then(|work| work.graph.as_ref())
+                .is_some(),
+            "export fixture must use graph-backed Work"
+        );
 
         let export_path = tmpdir.path().join("export.md");
         let result = export(&mut app, Some(export_path.to_str().unwrap()));
@@ -1251,6 +1292,12 @@ mod tests {
         assert!(content.contains("**Model:**"));
         assert!(content.contains("**You:**"));
         assert!(content.contains("**Assistant:**"));
+        assert_eq!(
+            app.work_state_snapshot()
+                .expect("Work snapshot after export"),
+            work_before,
+            "export is a projection and must never write Work state"
+        );
     }
 
     #[test]

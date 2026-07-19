@@ -620,8 +620,28 @@ fn compact_tokens(tokens: i64) -> String {
     }
 }
 
-/// Render the one-line shell header. Route, mode, permission, active-agent
-/// count, and context each have exactly one owner here.
+fn compact_effort_label(label: &str) -> &'static str {
+    let effective = label
+        .rsplit_once('→')
+        .map_or(label, |(_, effective)| effective);
+    let effective = effective
+        .rsplit_once(':')
+        .map_or(effective, |(_, effective)| effective)
+        .trim()
+        .to_ascii_lowercase();
+    match effective.as_str() {
+        "off" => "o",
+        "low" => "l",
+        "med" | "medium" => "m",
+        "high" => "h",
+        "max" | "maximum" | "xhigh" => "x",
+        "auto" => "a",
+        _ => "·",
+    }
+}
+
+/// Render the one-line shell header. Route, mode, requested/effective effort,
+/// permission, active-agent count, and context each have exactly one owner.
 pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -633,6 +653,7 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
 
     let (effective_provider, effective_model) = app.effective_route_identity_display();
     let route_label = format!("{effective_provider} · {effective_model}");
+    let effort_label = app.reasoning_effort_display_label();
     let status_indicator = crate::tui::widgets::header_status_indicator_frame(
         (!app.low_motion && app.fancy_animations)
             .then_some(app.turn_started_at)
@@ -658,6 +679,8 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
                 _ => app.ui_theme.mode_agent,
             }),
         ),
+        Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
+        Span::styled(effort_label.clone(), Style::default().fg(app.ui_theme.info)),
     ];
     // The selected brand/status mark is part of the user's chosen header,
     // not expendable wide-screen decoration. Keep it in compact layouts too;
@@ -672,7 +695,8 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
         ));
     }
     // Permission is safety state, not optional chrome. Compact terminals shed
-    // the status mark and context meter, but keep the effective posture.
+    // route detail and the context meter, but keep mode, effective effort, and
+    // the effective posture.
     left.push(Span::styled(
         " · ",
         Style::default().fg(app.ui_theme.text_dim),
@@ -715,9 +739,16 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
     if span_width(&left) > left_budget {
         let mode = mode_label(app.ui_locale, app.mode);
         let permission = permission_label(app);
+        let effort = if tier == ShellTier::Compact {
+            compact_effort_label(&effort_label).to_string()
+        } else {
+            effort_label.clone()
+        };
         let suffix = vec![
             Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
             Span::styled(mode, Style::default().fg(app.ui_theme.accent_primary)),
+            Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
+            Span::styled(effort, Style::default().fg(app.ui_theme.info)),
             Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
             Span::styled(permission, Style::default().fg(app.ui_theme.text_muted)),
         ];
@@ -1043,11 +1074,37 @@ mod tests {
         let mut app = test_app();
         app.mode = AppMode::Operate;
         app.approval_mode = ApprovalMode::Bypass;
+        app.reasoning_effort = crate::tui::app::ReasoningEffort::Low;
         app.model = "provider/model-with-a-deliberately-long-route-name".to_string();
 
         let header = header_text(&app, 40);
 
         assert!(header.starts_with("cw"), "brand missing: {header:?}");
+        assert!(
+            header.to_ascii_lowercase().contains("operate"),
+            "mode missing: {header:?}"
+        );
+        assert!(
+            header.contains("Full Access"),
+            "permission posture missing: {header:?}"
+        );
+        assert!(
+            header.contains(" · h · Full Access"),
+            "effective effort missing: {header:?}"
+        );
+    }
+
+    #[test]
+    fn normal_header_keeps_requested_effective_effort_before_route_detail() {
+        let mut app = test_app();
+        app.mode = AppMode::Operate;
+        app.approval_mode = ApprovalMode::Bypass;
+        app.reasoning_effort = crate::tui::app::ReasoningEffort::Low;
+        app.model = "provider/model-with-a-deliberately-long-route-name".to_string();
+
+        let header = header_text(&app, 80);
+
+        assert!(header.contains("low→high"), "effort missing: {header:?}");
         assert!(
             header.to_ascii_lowercase().contains("operate"),
             "mode missing: {header:?}"

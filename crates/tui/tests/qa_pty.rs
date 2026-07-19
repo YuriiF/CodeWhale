@@ -719,7 +719,10 @@ fn work_and_permission_are_visible_at_release_terminal_sizes() -> anyhow::Result
         let codewhale_home = ws.home().join(".codewhale");
         let codex_home = ws.home().join(".codex");
         std::fs::create_dir_all(&codex_home)?;
-        std::fs::write(codewhale_home.join("config.toml"), "allow_shell = true\n")?;
+        std::fs::write(
+            codewhale_home.join("config.toml"),
+            "allow_shell = true\nreasoning_effort = \"low\"\n",
+        )?;
         std::fs::write(
             codewhale_home.join("settings.toml"),
             "permission_posture = \"full-access\"\n",
@@ -825,6 +828,16 @@ fn work_and_permission_are_visible_at_release_terminal_sizes() -> anyhow::Result
             frame.contains("Operate") || frame.contains("operate"),
             "restored mode missing at {cols}x{rows}:\n{dump}"
         );
+        let header = frame.row(0);
+        let effort_receipt = if cols >= 60 {
+            " · high · Full Access"
+        } else {
+            " · h · Full Access"
+        };
+        assert!(
+            header.contains(effort_receipt),
+            "effective effort missing at {cols}x{rows}: {header:?}\n{dump}"
+        );
 
         if let Some(dir) = std::env::var_os("CODEWHALE_QA_EVIDENCE_DIR") {
             let dir = std::path::PathBuf::from(dir);
@@ -834,6 +847,223 @@ fn work_and_permission_are_visible_at_release_terminal_sizes() -> anyhow::Result
 
         let _ = h.shutdown();
     }
+    Ok(())
+}
+
+/// WG6 integrated proof: a real TUI migrates legacy Plan/To-do state, records
+/// Ctrl+T as a typed receipt, preserves it across explicit save/export/save,
+/// and restores the same graph-backed Work state after process restart.
+#[test]
+fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let ws = make_sealed_workspace()?;
+    let codewhale_home = ws.home().join(".codewhale");
+    let codex_home = ws.home().join(".codex");
+    std::fs::create_dir_all(&codex_home)?;
+    std::fs::write(
+        codewhale_home.join("config.toml"),
+        "allow_shell = true\nreasoning_effort = \"low\"\n",
+    )?;
+    std::fs::write(
+        codewhale_home.join("settings.toml"),
+        "permission_posture = \"full-access\"\n",
+    )?;
+    std::fs::write(
+        codex_home.join("models_cache.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "fetched_at": chrono::Utc::now(),
+            "models": [{"slug": "gpt-pty-fixture", "priority": 1}]
+        }))?,
+    )?;
+
+    let legacy_path = ws.workspace().join("legacy-work-session.json");
+    std::fs::write(
+        &legacy_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "metadata": {
+                "id": "pty-wg6-legacy",
+                "title": "WG6 legacy continuity",
+                "created_at": "2026-07-10T00:00:00Z",
+                "updated_at": "2026-07-10T00:00:00Z",
+                "message_count": 0,
+                "total_tokens": 0,
+                "model": "deepseek-v4-pro",
+                "model_provider": "deepseek",
+                "workspace": ws.workspace(),
+                "mode": "operate",
+                "cost": {},
+                "cumulative_turn_secs": 0
+            },
+            "messages": [],
+            "system_prompt": null,
+            "work_state": {
+                "todos": {
+                    "items": [
+                        {"id": 1, "content": "persisted inspect", "status": "completed"},
+                        {"id": 2, "content": "persisted patch", "status": "in_progress"}
+                    ],
+                    "completion_pct": 50,
+                    "in_progress_id": 2
+                },
+                "plan": {
+                    "objective": "Keep WG6 Work durable",
+                    "items": [{"step": "verify integrated PTY", "status": "in_progress"}]
+                }
+            }
+        }))?,
+    )?;
+
+    let spawn = || {
+        Harness::builder(Harness::cargo_bin("codewhale-tui"))
+            .cwd(ws.workspace())
+            .clear_env()
+            .seal_home(ws.home())
+            .env("CODEWHALE_HOME", codewhale_home.to_string_lossy())
+            .env(
+                "DEEPSEEK_CONFIG_PATH",
+                codewhale_home.join("config.toml").to_string_lossy(),
+            )
+            .env("CODEX_HOME", codex_home.to_string_lossy())
+            .env("DEEPSEEK_API_KEY", "ci-test-key-not-real")
+            .env("DEEPSEEK_BASE_URL", "http://127.0.0.1:1")
+            .env("NO_ANIMATIONS", "1")
+            .env("RUST_LOG", "warn")
+            .args([
+                "--workspace",
+                ws.workspace().to_str().expect("utf-8 workspace path"),
+                "--no-project-config",
+                "--skip-onboarding",
+            ])
+            .size(16, 60)
+            .spawn()
+    };
+
+    let mut h = spawn()?;
+    enter_launch_session(&mut h)?;
+    h.send(keys::key::text(&format!(
+        "/load {}",
+        legacy_path.to_string_lossy()
+    )))?;
+    h.wait_for_text("/load", KEY_TIMEOUT)?;
+    h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    h.send(keys::key::enter())?;
+    h.wait_for_text("Work", KEY_TIMEOUT)?;
+    h.wait_for_idle(Duration::from_millis(250), Duration::from_secs(3))?;
+    assert!(
+        h.frame().contains("persisted"),
+        "{}",
+        h.frame().debug_dump()
+    );
+
+    h.send(b"\x14")?;
+    h.wait_for_text("Reasoning effort: max", KEY_TIMEOUT)?;
+    h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    let cycled = h.frame();
+    assert!(
+        cycled.row(0).contains(" · max · Full Access"),
+        "Ctrl+T effort missing from narrow header:\n{}",
+        cycled.debug_dump()
+    );
+    assert!(cycled.contains("Work"), "{}", cycled.debug_dump());
+
+    let before_path = ws.workspace().join("wg6-before-export.json");
+    h.send(keys::key::text(&format!(
+        "/save {}",
+        before_path.to_string_lossy()
+    )))?;
+    h.wait_for_text("/save", KEY_TIMEOUT)?;
+    h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    h.send(keys::key::enter())?;
+    h.wait_for_text("Session saved to", KEY_TIMEOUT)?;
+
+    let export_path = ws.workspace().join("wg6-export.md");
+    h.send(keys::key::text(&format!(
+        "/export {}",
+        export_path.to_string_lossy()
+    )))?;
+    h.wait_for_text("/export", KEY_TIMEOUT)?;
+    h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    h.send(keys::key::enter())?;
+    h.wait_for_text("Exported to", KEY_TIMEOUT)?;
+
+    let after_path = ws.workspace().join("wg6-after-export.json");
+    h.send(keys::key::text(&format!(
+        "/save {}",
+        after_path.to_string_lossy()
+    )))?;
+    h.wait_for_text("/save", KEY_TIMEOUT)?;
+    h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    h.send(keys::key::enter())?;
+    h.wait_for_text("Session saved to", KEY_TIMEOUT)?;
+
+    let deadline = Instant::now() + KEY_TIMEOUT;
+    while (!before_path.exists() || !after_path.exists() || !export_path.exists())
+        && Instant::now() < deadline
+    {
+        h.pump();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(before_path.exists(), "first save was not written");
+    assert!(after_path.exists(), "post-export save was not written");
+    assert!(export_path.exists(), "export was not written");
+
+    let before: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&before_path)?)?;
+    let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&after_path)?)?;
+    let work = &before["work_state"];
+    assert!(work["graph"].is_object(), "migrated graph missing: {work}");
+    assert_eq!(
+        work["todos"]["items"][1]["content"], "persisted patch",
+        "visible legacy To-do state drifted"
+    );
+    assert_eq!(
+        work["plan"]["objective"], "Keep WG6 Work durable",
+        "visible legacy Plan state drifted"
+    );
+    let activity = work["graph"]["activities"]
+        .as_array()
+        .and_then(|activities| activities.last())
+        .expect("Ctrl+T Work activity");
+    assert_eq!(activity["kind"], "reasoning_effort_changed");
+    assert_eq!(activity["requested"], "max");
+    assert_eq!(activity["effective"], "max");
+    assert_eq!(activity["provider"], "deepseek");
+    let receipt = activity.as_object().expect("typed activity object");
+    for forbidden in ["text", "content", "reasoning", "reasoning_text"] {
+        assert!(
+            !receipt.contains_key(forbidden),
+            "activity leaked forbidden field {forbidden}: {activity}"
+        );
+    }
+    assert_eq!(
+        before["work_state"], after["work_state"],
+        "export mutated graph-backed Work state"
+    );
+    assert!(
+        std::fs::read_to_string(&export_path)?.contains("# Chat Export"),
+        "full export artifact missing"
+    );
+    let _ = h.shutdown();
+
+    let mut restored = spawn()?;
+    enter_launch_session(&mut restored)?;
+    restored.send(keys::key::text(&format!(
+        "/load {}",
+        after_path.to_string_lossy()
+    )))?;
+    restored.wait_for_text("/load", KEY_TIMEOUT)?;
+    restored.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    restored.send(keys::key::enter())?;
+    restored.wait_for_text("Work", KEY_TIMEOUT)?;
+    restored.wait_for_idle(Duration::from_millis(250), Duration::from_secs(3))?;
+    let frame = restored.frame();
+    assert!(frame.contains("persisted"), "{}", frame.debug_dump());
+    assert!(
+        frame.row(0).contains(" · high · Full Access"),
+        "restart lost narrow effort/permission truth:\n{}",
+        frame.debug_dump()
+    );
+    let _ = restored.shutdown();
     Ok(())
 }
 
