@@ -1030,16 +1030,7 @@ impl HotbarAction for AppHotbarAction {
                 if app.auto_model {
                     bail!("Reasoning effort is controlled by auto model routing.");
                 }
-                app.reasoning_effort = app
-                    .reasoning_effort
-                    .cycle_next_for_provider(app.api_provider);
-                app.last_effective_reasoning_effort = None;
-                app.update_model_compaction_budget();
-                app.status_message = Some(format!(
-                    "Reasoning effort: {}",
-                    app.reasoning_effort
-                        .display_label_for_provider(app.api_provider)
-                ));
+                app.apply_reasoning_effort_cycle();
                 Ok(HotbarDispatch::AppAction(AppAction::UpdateCompaction(
                     app.compaction_config(),
                 )))

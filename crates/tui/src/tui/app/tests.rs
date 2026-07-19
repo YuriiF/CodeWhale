@@ -299,6 +299,34 @@ fn mode_and_thinking_are_locked_while_a_turn_is_running() {
 }
 
 #[test]
+fn cycle_effort_updates_effort_status_and_compaction() {
+    // Ctrl+T parity with the hotbar's `reasoning.cycle` action: cycling the
+    // effort must surface a status message and refresh the compaction budget,
+    // not just silently flip the setting.
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.auto_model = false;
+    app.reasoning_effort = ReasoningEffort::Off;
+    // Sentinel so the test can observe update_model_compaction_budget().
+    app.compact_threshold = 0;
+
+    app.cycle_effort();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::High);
+    assert!(app.reasoning_effort_explicit);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Reasoning effort: high"),
+        "Ctrl+T must give visible feedback like the hotbar action"
+    );
+    assert_ne!(
+        app.compact_threshold, 0,
+        "cycling effort must refresh the compaction budget"
+    );
+    assert!(app.needs_redraw);
+}
+
+#[test]
 fn reasoning_effort_api_values_are_provider_aware_for_codex() {
     assert_eq!(
         ReasoningEffort::Off.normalize_for_provider(ApiProvider::OpenaiCodex),

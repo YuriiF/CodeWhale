@@ -3623,13 +3623,26 @@ impl App {
         if self.reject_setting_change_while_busy("Thinking") {
             return;
         }
+        self.reasoning_effort_explicit = true;
+        self.apply_reasoning_effort_cycle();
+    }
+
+    /// Advance reasoning effort to the next tier for the active provider and
+    /// surface the change: set a status message and refresh the compaction
+    /// budget. Shared by the Ctrl+T shortcut (`cycle_effort`) and the hotbar
+    /// `reasoning.cycle` action so the two paths cannot drift.
+    pub(crate) fn apply_reasoning_effort_cycle(&mut self) {
         self.reasoning_effort = self
             .reasoning_effort
             .cycle_next_for_provider(self.api_provider);
-        self.reasoning_effort_explicit = true;
         self.last_effective_reasoning_effort = None;
+        self.update_model_compaction_budget();
+        self.status_message = Some(format!(
+            "Reasoning effort: {}",
+            self.reasoning_effort
+                .display_label_for_provider(self.api_provider)
+        ));
         self.needs_redraw = true;
-        // Effort chip in the header is canonical — no duplicate toast.
     }
 
     /// Cycle the durable Agent permission posture: Ask → Auto-Review → Bypass.
