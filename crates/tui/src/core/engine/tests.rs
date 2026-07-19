@@ -7442,7 +7442,7 @@ fn slop_gate_does_not_change_the_stable_system_prompt() {
 }
 
 #[test]
-fn slop_gate_is_an_external_user_turn_tail_block() {
+fn slop_gate_is_an_initial_external_user_turn_tail_block() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
@@ -7477,10 +7477,21 @@ fn slop_gate_is_an_external_user_turn_tail_block() {
         Some(marker.to_string()),
     ));
     let runtime =
-        engine.with_slop_ledger_gate_for_external_turn(runtime, UserInputProvenance::Runtime);
+        engine.with_slop_ledger_gate_for_initial_user_turn(runtime, UserInputProvenance::Runtime);
     assert_eq!(runtime.content.len(), 2);
     assert!(
         !runtime
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text, .. } if text == marker))
+    );
+
+    // `turn_loop` uses this plain constructor for mid-turn steers. The gate
+    // from the initial message is already in that turn's transcript, so a
+    // steer must not duplicate the mutable block.
+    let steer = engine.user_text_message_with_turn_metadata("mid-turn steer".to_string());
+    assert!(
+        !steer
             .content
             .iter()
             .any(|block| matches!(block, ContentBlock::Text { text, .. } if text == marker))

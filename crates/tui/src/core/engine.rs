@@ -2414,7 +2414,11 @@ impl Engine {
         )
     }
 
-    fn with_slop_ledger_gate_for_external_turn(
+    /// Snapshot the mutable completion gate once for a new top-level user
+    /// turn. Mid-turn steers stay inside the same `handle_deepseek_turn` and
+    /// reuse this already-present block; reinjecting it on every steer would
+    /// duplicate debt text and erase the token-economy benefit of this seam.
+    fn with_slop_ledger_gate_for_initial_user_turn(
         &mut self,
         message: Message,
         provenance: UserInputProvenance,
@@ -2817,7 +2821,7 @@ impl Engine {
             reasoning_effort_auto,
             provenance,
         );
-        let user_msg = self.with_slop_ledger_gate_for_external_turn(user_msg, provenance);
+        let user_msg = self.with_slop_ledger_gate_for_initial_user_turn(user_msg, provenance);
         self.session.add_message(user_msg);
 
         let previous_goal_objective = self.config.goal_objective.clone();
