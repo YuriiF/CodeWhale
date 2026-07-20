@@ -7224,6 +7224,27 @@ pub(crate) fn moonshot_base_url_is_exact_kimi_code(base_url: &str) -> bool {
     )
 }
 
+/// The exact Moonshot direct-API endpoint, normalized only for an
+/// insignificant trailing slash. Custom gateways must retain their own wire
+/// contract even when they expose a `kimi-k3` model id.
+pub(crate) fn moonshot_base_url_is_exact_direct_platform(base_url: &str) -> bool {
+    codewhale_config::provider::is_exact_moonshot_platform_route(
+        codewhale_config::ProviderKind::Moonshot,
+        base_url,
+    )
+}
+
+/// Whether a route is exactly Moonshot's direct pay-as-you-go K3 route.
+pub(crate) fn is_exact_direct_moonshot_k3_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    provider == ApiProvider::Moonshot
+        && moonshot_base_url_is_exact_direct_platform(base_url)
+        && model.trim().eq_ignore_ascii_case(MOONSHOT_KIMI_K3_MODEL)
+}
+
 /// Whether a route is exactly the Kimi Code K3 membership-plan route.
 ///
 /// Keep the bare `k3` identifier route-owned. In particular, do not infer a

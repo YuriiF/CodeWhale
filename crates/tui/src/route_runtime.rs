@@ -785,12 +785,12 @@ mod tests {
 
     #[test]
     fn kimi_code_k3_baseline_does_not_leak_to_other_moonshot_routes() {
-        let exact_endpoint = Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string());
+        let kimi_code_endpoint = Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string());
         let direct_moonshot = resolve_route_candidate(
             ApiProvider::Moonshot,
-            Some("kimi-k3"),
+            Some(crate::config::MOONSHOT_KIMI_K3_MODEL),
             None,
-            exact_endpoint.clone(),
+            Some(crate::config::DEFAULT_MOONSHOT_BASE_URL.to_string()),
             None,
         )
         .expect("direct Moonshot K3 route");
@@ -810,7 +810,7 @@ mod tests {
             ApiProvider::Moonshot,
             Some(crate::config::DEFAULT_KIMI_CODE_MODEL),
             None,
-            exact_endpoint,
+            kimi_code_endpoint,
             None,
         )
         .expect("Kimi Code default route");

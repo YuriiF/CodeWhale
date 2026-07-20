@@ -489,6 +489,8 @@ max_subagents = 10 # optional (1-20)
 # api_key = "YOUR_MOONSHOT_API_KEY"           # or KIMI_API_KEY
 # base_url = "https://api.moonshot.ai/v1"      # or KIMI_BASE_URL
 # model = "kimi-k3"                         # direct Moonshot K3 wire ID
+# Direct K3 is always-thinking: off -> low, medium -> high, and max remains max.
+# The exact direct route sends top-level reasoning_effort (never thinking.disabled).
 # Kimi Code membership path (key: https://www.kimi.com/code/console):
 # api_key = "YOUR_KIMI_CODE_API_KEY"
 # base_url = "https://api.kimi.com/coding/v1"

@@ -183,6 +183,11 @@ pub struct DeepSeekClient {
     rate_limiter: Arc<AsyncMutex<TokenBucket>>,
     request_concurrency: Option<ProviderConcurrencyLimiter>,
     path_suffix: Option<String>,
+    /// Unit tests keep the semantic route exact while sending the actual
+    /// production request through a local capture server. This field is
+    /// compiled out of release builds.
+    #[cfg(test)]
+    test_chat_transport_base_url: Option<String>,
     pub(super) reasoning_stream_style: Option<String>,
     pub(super) stream_idle_timeout: Duration,
 }
@@ -430,6 +435,8 @@ impl Clone for DeepSeekClient {
             rate_limiter: self.rate_limiter.clone(),
             request_concurrency: self.request_concurrency.clone(),
             path_suffix: self.path_suffix.clone(),
+            #[cfg(test)]
+            test_chat_transport_base_url: self.test_chat_transport_base_url.clone(),
             reasoning_stream_style: self.reasoning_stream_style.clone(),
             stream_idle_timeout: self.stream_idle_timeout,
         }
@@ -1004,9 +1011,24 @@ impl DeepSeekClient {
             rate_limiter: Arc::new(AsyncMutex::new(TokenBucket::from_env())),
             request_concurrency: request_concurrency_limit.map(ProviderConcurrencyLimiter::new),
             path_suffix,
+            #[cfg(test)]
+            test_chat_transport_base_url: None,
             reasoning_stream_style,
             stream_idle_timeout,
         })
+    }
+
+    /// Transport destination for Chat Completions requests.
+    ///
+    /// Production always uses the semantic route base URL. Unit tests may
+    /// substitute a local capture server without changing the endpoint/model
+    /// identity used by exact-route request shaping.
+    pub(super) fn chat_transport_base_url(&self) -> &str {
+        #[cfg(test)]
+        if let Some(base_url) = self.test_chat_transport_base_url.as_deref() {
+            return base_url;
+        }
+        &self.base_url
     }
 
     /// Return a request whose tool results are safe to send to an upstream
@@ -2689,6 +2711,159 @@ mod tests {
             strict: Some(true),
             cache_control: None,
         }
+    }
+
+    fn k3_request_fixture(model: &str, effort: &str, stream: bool) -> MessageRequest {
+        MessageRequest {
+            model: model.to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "request-boundary fixture".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some(effort.to_string()),
+            stream: Some(stream),
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    async fn capture_moonshot_chat_request(
+        route_base_url: &str,
+        model: &str,
+        effort: &str,
+        streaming: bool,
+    ) -> Value {
+        let server = MockServer::start().await;
+        let response = if streaming {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n")
+        } else {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-k3-request-boundary",
+                "object": "chat.completion",
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2
+                }
+            }))
+        };
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut client = DeepSeekClient::new(&Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(ProvidersConfig {
+                moonshot: ProviderConfig {
+                    api_key: Some("moonshot-request-boundary-key".to_string()),
+                    base_url: Some(route_base_url.to_string()),
+                    model: Some(model.to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("Moonshot request-boundary client");
+        assert_eq!(client.base_url, route_base_url);
+        client.test_chat_transport_base_url = Some(server.uri());
+
+        let request = k3_request_fixture(model, effort, streaming);
+        if streaming {
+            let mut stream = client
+                .create_message_stream(request)
+                .await
+                .expect("streaming request succeeds");
+            while let Some(event) = stream.next().await {
+                event.expect("captured SSE response remains valid");
+            }
+        } else {
+            client
+                .create_message(request)
+                .await
+                .expect("non-streaming request succeeds");
+        }
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        serde_json::from_slice(&requests[0].body).expect("captured request JSON")
+    }
+
+    async fn assert_k3_request_json_route_boundaries(streaming: bool) {
+        for (requested, expected) in [("off", "low"), ("high", "high"), ("max", "max")] {
+            let body = capture_moonshot_chat_request(
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K3_MODEL,
+                requested,
+                streaming,
+            )
+            .await;
+            assert_eq!(body["reasoning_effort"], json!(expected), "{body}");
+            assert!(body.get("thinking").is_none(), "{body}");
+            assert_eq!(
+                body.get("stream").and_then(Value::as_bool),
+                streaming.then_some(true)
+            );
+        }
+
+        let membership = capture_moonshot_chat_request(
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+            "max",
+            streaming,
+        )
+        .await;
+        assert_eq!(
+            membership["thinking"],
+            json!({"type": "enabled", "effort": "max"}),
+            "{membership}"
+        );
+        assert!(membership.get("reasoning_effort").is_none(), "{membership}");
+
+        let neighbor = capture_moonshot_chat_request(
+            "https://proxy.example/v1",
+            crate::config::MOONSHOT_KIMI_K3_MODEL,
+            "max",
+            streaming,
+        )
+        .await;
+        assert_eq!(
+            neighbor["thinking"],
+            json!({"type": "enabled"}),
+            "{neighbor}"
+        );
+        assert!(neighbor.get("reasoning_effort").is_none(), "{neighbor}");
+        assert!(neighbor.pointer("/thinking/effort").is_none(), "{neighbor}");
+    }
+
+    #[tokio::test]
+    async fn create_message_request_json_honors_exact_k3_route_boundaries() {
+        assert_k3_request_json_route_boundaries(false).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_stream_request_json_honors_exact_k3_route_boundaries() {
+        assert_k3_request_json_route_boundaries(true).await;
     }
 
     const CONFIG_SECRET_SENTINELS: [&str; 8] = [
