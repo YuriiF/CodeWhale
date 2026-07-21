@@ -4861,6 +4861,9 @@ fn jobs_panel_ignores_model_reasoning_but_shows_for_real_jobs() {
         elapsed_since_output_ms: None,
         owner_agent_id: None,
         owner_agent_name: None,
+        current_tool: None,
+        role: None,
+        files_touched: 0,
     }];
     assert!(
         crate::tui::sidebar::sidebar_auto_idle(&mut app),
@@ -4878,6 +4881,9 @@ fn jobs_panel_ignores_model_reasoning_but_shows_for_real_jobs() {
         elapsed_since_output_ms: None,
         owner_agent_id: None,
         owner_agent_name: None,
+        current_tool: None,
+        role: None,
+        files_touched: 0,
     });
     assert!(
         crate::tui::sidebar::sidebar_auto_idle(&mut app),
@@ -4895,6 +4901,9 @@ fn jobs_panel_ignores_model_reasoning_but_shows_for_real_jobs() {
         elapsed_since_output_ms: None,
         owner_agent_id: None,
         owner_agent_name: None,
+        current_tool: None,
+        role: None,
+        files_touched: 0,
     });
     assert!(
         !crate::tui::sidebar::sidebar_auto_idle(&mut app),
@@ -4918,6 +4927,9 @@ fn ctrl_x_jobs_prefill_only_catches_running_shell_jobs_in_tasks_sidebar() {
         elapsed_since_output_ms: None,
         owner_agent_id: None,
         owner_agent_name: None,
+        current_tool: None,
+        role: None,
+        files_touched: 0,
     });
 
     assert!(prefill_jobs_cancel_all_if_tasks_sidebar(&mut app));
@@ -4945,6 +4957,9 @@ fn ctrl_x_jobs_prefill_falls_through_outside_tasks_sidebar_shell_jobs() {
         elapsed_since_output_ms: None,
         owner_agent_id: None,
         owner_agent_name: None,
+        current_tool: None,
+        role: None,
+        files_touched: 0,
     });
 
     assert!(!prefill_jobs_cancel_all_if_tasks_sidebar(&mut non_shell));
@@ -4964,6 +4979,9 @@ fn ctrl_x_jobs_prefill_falls_through_outside_tasks_sidebar_shell_jobs() {
         elapsed_since_output_ms: None,
         owner_agent_id: None,
         owner_agent_name: None,
+        current_tool: None,
+        role: None,
+        files_touched: 0,
     });
 
     assert!(!prefill_jobs_cancel_all_if_tasks_sidebar(
@@ -11971,6 +11989,9 @@ fn render_footer_from_surfaces_background_shell_even_without_tasks_panel() {
         elapsed_since_output_ms: None,
         owner_agent_id: None,
         owner_agent_name: None,
+        current_tool: None,
+        role: None,
+        files_touched: 0,
     }];
 
     let props = render_footer_from(&app, &[], None);
@@ -13206,6 +13227,9 @@ mod work_sidebar_projection_tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         };
         assert_eq!(entry.status, "completed");
         assert_ne!(entry.status, "running");

@@ -911,6 +911,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         let result = load(&mut app, Some("does-not-exist.json"));

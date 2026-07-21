@@ -4930,6 +4930,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         app.sidebar_focus = SidebarFocus::Tasks;
@@ -4966,6 +4969,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         let row_sets = task_panel_row_sets(&app);
@@ -5065,6 +5071,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         let text = lines_to_text(&task_panel_lines(&app, 80, 10));
@@ -5101,6 +5110,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         let text = lines_to_text(&task_panel_lines(&app, 96, 8));
@@ -5136,6 +5148,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: Some("agent_verifier".to_string()),
             owner_agent_name: Some("verifier".to_string()),
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         let text = lines_to_text(&task_panel_lines(&app, 96, 8));
@@ -5162,6 +5177,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         };
 
         assert_eq!(
@@ -5196,6 +5214,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         let text = lines_to_text(&task_panel_lines(&app, 80, 8));
@@ -5257,6 +5278,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
         app.task_panel.push(TaskPanelEntry {
             id: "shell_live".to_string(),
@@ -5268,6 +5292,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         let text = lines_to_text(&task_panel_lines(&app, 96, 12));
@@ -5313,6 +5340,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         let (lines, actions) = task_panel_rows(&app, &task_panel_row_sets(&app), 80, 12);
@@ -5353,6 +5383,9 @@ mod tests {
             elapsed_since_output_ms: Some(61_000),
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         let (lines, actions) = task_panel_rows(&app, &task_panel_row_sets(&app), 80, 12);
@@ -5396,6 +5429,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
         app.task_panel.push(TaskPanelEntry {
             id: "task_bbb".to_string(),
@@ -5407,6 +5443,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         let (lines, actions) = task_panel_rows(&app, &task_panel_row_sets(&app), 96, 16);
@@ -5474,6 +5513,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         let (lines, actions) = task_panel_rows(&app, &task_panel_row_sets(&app), 80, 12);
@@ -5528,6 +5570,9 @@ mod tests {
             elapsed_since_output_ms: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
         });
 
         let (lines, actions) = task_panel_rows(&app, &task_panel_row_sets(&app), 96, 16);
