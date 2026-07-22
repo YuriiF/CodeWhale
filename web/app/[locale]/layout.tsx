@@ -50,8 +50,8 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
       ? "Codewhale — 一个运行时，所有模型，你的机器"
       : "Codewhale — One runtime. Every model. Your machine.",
     description: isZh
-      ? "开源终端编程智能体，适配任意模型，开放模型优先。TUI、CLI 与本地工具——运行在你自己的机器上。Rust 编写，MIT 许可。"
-      : "Open-source terminal coding agent for any model, open models first. TUI, CLI, and local tools — runs on your machine. Rust, MIT.",
+      ? "开源终端编程智能体，适配受支持的托管与本地模型，开放模型优先。TUI、CLI 与本地工具——运行在你自己的机器上。Rust 编写，MIT 许可。"
+      : "Open-source terminal coding agent for supported hosted and local models, open models first. TUI, CLI, and local tools — runs on your machine. Rust, MIT.",
   });
 }
 

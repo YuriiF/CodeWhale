@@ -9,8 +9,8 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
     locale,
     title: isZh ? "工具 · Codewhale 文档" : "Tools · Codewhale Docs",
     description: isZh
-      ? "类型化工具集、工具生命周期和精选工具目录。"
-      : "Typed tool surface, tool lifecycle, and the curated tool catalog.",
+      ? "Bash、File、Git、Run 四个核心 action 工具，以及协调、延迟加载与回放兼容边界。"
+      : "Canonical Bash, File, Git, and Run action tools, coordination tools, deferred loading, and replay compatibility.",
   });
 }
 
@@ -42,32 +42,32 @@ export default async function ToolsPage({ params }: { params: Promise<{ locale: 
         <div className="hairline-t hairline-b mt-6">
           {[
             {
-              group: isZh ? "文件操作" : "File ops",
-              tools: "read_file · list_dir · write_file · edit_file · apply_patch",
+              group: "Bash",
+              tools: "run · wait · interact · cancel",
             },
             {
-              group: isZh ? "搜索" : "Search",
-              tools: "grep_files · file_search · web_search · fetch_url",
+              group: "File",
+              tools: "read · list · search_name · search_content · write · edit · patch",
             },
             {
-              group: "Shell",
-              tools: "exec_shell · exec_shell_wait · exec_shell_interact",
+              group: "Git",
+              tools: "status · diff · log · show · blame",
             },
             {
-              group: isZh ? "Git / 诊断 / 测试" : "Git / diag / test",
-              tools: "git_status · git_diff · diagnostics · run_tests",
+              group: "Run",
+              tools: "tests · verifiers",
             },
             {
-              group: isZh ? "子 Agent" : "Sub-agents",
+              group: isZh ? "协调" : "Coordination",
               tools: isZh
-                ? "agent —— 持久会话，并行执行；详见 docs/SUBAGENTS.md"
-                : "agent — persistent sessions, parallel execution; see docs/SUBAGENTS.md",
+                ? "agent · tasks · update_plan · work_update · tool_search"
+                : "agent · tasks · update_plan · work_update · tool_search",
             },
             {
-              group: isZh ? "递归 LM (RLM)" : "Recursive LM (RLM)",
+              group: isZh ? "延迟加载" : "Deferred",
               tools: isZh
-                ? "rlm_open · rlm_eval · rlm_configure · rlm_close —— 沙箱 Python REPL，内置 peek/search/chunk/sub_query_batch 等辅助函数"
-                : "rlm_open · rlm_eval · rlm_configure · rlm_close — sandboxed Python REPL with peek/search/chunk/sub_query_batch helpers",
+                ? "Web（search · fetch · wait）仅在网络策略允许时通过 tool_search 加载；github、automation 与 rlm 也默认延迟加载"
+                : "Web (search · fetch · wait) loads through tool_search only when network policy permits; github, automation, and rlm are deferred by default",
             },
             {
               group: "MCP",
@@ -91,28 +91,28 @@ export default async function ToolsPage({ params }: { params: Promise<{ locale: 
         </div>
       </section>
 
-      <section id="lifecycle" className="scroll-mt-32">
+      <section id="compatibility" className="scroll-mt-32">
         <h2 className="font-display text-2xl mb-1">
-          {isZh ? "工具生命周期" : "Tool Lifecycle"}
+          {isZh ? "回放兼容" : "Replay compatibility"}
         </h2>
         <p className={`text-ink-soft mt-3 ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
           {isZh
-            ? "工具注册、发现、弃用和稳定的完整流程详见仓库文档。"
-            : "Full lifecycle for tool registration, discovery, deprecation, and stabilization is documented in the repo."}
+            ? "旧的单用途工具名只为已保存的 transcript 与自动化回放保留。它们仍可按原名执行，但不会出现在模型目录或 tool_search 中；新工作应使用上方的 canonical action 工具。"
+            : "Legacy single-purpose names remain callable only so saved transcripts and automation can replay. They stay out of the model catalog and tool_search; new work uses the canonical action tools above."}
         </p>
         <Link
-          href="https://github.com/Hmbown/CodeWhale/blob/main/docs/TOOL_LIFECYCLE.md"
+          href="https://github.com/Hmbown/CodeWhale/blob/main/docs/RUNTIME_SIMPLIFICATION_DESIGN.md"
           className="inline-block mt-3 font-mono text-xs uppercase tracking-wider text-indigo hover:underline"
         >
-          docs/TOOL_LIFECYCLE.md →
+          docs/RUNTIME_SIMPLIFICATION_DESIGN.md →
         </Link>
       </section>
 
       <section id="source" className="hairline-t pt-8">
         <p className="text-sm text-ink-mute">
           {isZh
-            ? "来源文档：docs/TOOL_SURFACE.md, docs/TOOL_LIFECYCLE.md · 更新时请同步修改 docs-map.ts。"
-            : "Source documents: docs/TOOL_SURFACE.md, docs/TOOL_LIFECYCLE.md · Update docs-map.ts when changing."}
+            ? "来源文档：docs/TOOL_SURFACE.md, docs/RUNTIME_SIMPLIFICATION_DESIGN.md · 更新时请同步修改 docs-map.ts。"
+            : "Source documents: docs/TOOL_SURFACE.md, docs/RUNTIME_SIMPLIFICATION_DESIGN.md · Update docs-map.ts when changing."}
         </p>
       </section>
     </section>

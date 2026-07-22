@@ -117,7 +117,11 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                 : isZh
                   ? "发布状态暂不可用"
                   : "Release status unavailable"}{" "}
-              <span>·</span> {providerCount} {isZh ? "个提供商路由" : "provider routes"}{" "}
+              <span>·</span>{" "}
+              {isZh
+                ? `${sourceIsPublished ? "当前源码" : "源码候选版"} v${sourceVersion}：`
+                : `${sourceIsPublished ? "Current source" : "Source candidate"} v${sourceVersion}: `}
+              {providerCount} {isZh ? "个提供商路由" : "provider routes"}{" "}
               <span>·</span> {facts.license ?? "MIT"}
             </p>
           </div>
@@ -181,7 +185,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
           <div className="product-receipt" aria-label={isZh ? "工作流程示例" : "Example work receipt"}>
             <span>$ codewhale exec &quot;fix the failing test&quot;</span>
             <span>inspect&nbsp;&nbsp; repository and instructions</span>
-            <span>act&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; edit through the selected approval posture</span>
+            <span>act&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; edit through the selected permission posture</span>
             <span>verify&nbsp;&nbsp;&nbsp; cargo test --locked</span>
             <strong>report&nbsp;&nbsp;&nbsp; checks passed · receipt saved</strong>
           </div>
@@ -208,8 +212,8 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             </h2>
             <p>
               {isZh
-                ? "显式选择模型、工作模式与审批姿态。Codewhale 不会把未知成本显示成零，也不会把预览功能说成已发布产品。"
-                : "Choose the model, working mode, and approval posture explicitly. Unknown cost stays unknown, and preview surfaces stay labeled as such."}
+                ? "显式选择模型、工作模式与权限姿态。Codewhale 不会把未知成本显示成零，也不会把预览功能说成已发布产品。"
+                : "Choose the model, working mode, and permission posture explicitly. Unknown cost stays unknown, and preview surfaces stay labeled as such."}
             </p>
           </div>
           <dl className="product-boundary-list">
@@ -223,7 +227,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             </div>
             <div>
               <dt>Ask · Auto-Review · Full Access</dt>
-              <dd>{isZh ? "为任务选择审批姿态" : "Choose the approval posture for the work"}</dd>
+              <dd>{isZh ? "为任务选择权限姿态" : "Choose the permission posture for the work"}</dd>
             </div>
             <div>
               <dt>TUI · exec · web · API</dt>

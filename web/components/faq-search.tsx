@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useMemo, useRef, useCallback, useEffect } from "react";
+import { faqSourceHref } from "@/lib/faq-source";
 
 export interface FaqSearchItem {
   q: string;
@@ -161,9 +162,22 @@ export function FaqSearch({
                     <span className="font-mono text-[0.66rem] text-ink-mute uppercase tracking-wider">
                       {isZh ? "来源" : "Sources"}:
                     </span>
-                    {item.sources.map((s) => (
-                      <span key={s} className="font-mono text-[0.7rem] text-indigo">{s}</span>
-                    ))}
+                    {item.sources.map((s) => {
+                      const href = faqSourceHref(s);
+                      return href ? (
+                        <a
+                          key={s}
+                          href={href}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-mono text-[0.7rem] text-indigo hover:underline"
+                        >
+                          {s}
+                        </a>
+                      ) : (
+                        <span key={s} className="font-mono text-[0.7rem] text-indigo">{s}</span>
+                      );
+                    })}
                   </div>
                 )}
               </div>

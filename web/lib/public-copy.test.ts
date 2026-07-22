@@ -88,6 +88,8 @@ describe("public website copy contracts", () => {
     expect(homepage).toContain("facts.latestPublishedRelease");
     expect(homepage).toContain("source candidate");
     expect(homepage).toContain("publishedRelease.url");
+    expect(homepage).toContain("Source candidate");
+    expect(homepage).toContain("provider routes");
     expect(homepage).not.toContain("releases/tag/v${version}");
     expect(homepage).not.toMatch(/Codewhale v0\.9\.1|\"v0\.9\.1 \u00b7/);
     expect(install).toContain("publishedRelease.tag");

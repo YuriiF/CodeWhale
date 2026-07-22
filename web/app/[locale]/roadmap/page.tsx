@@ -1,42 +1,45 @@
 import Link from "next/link";
 import { getCachedRoadmap, type RoadmapItem } from "@/lib/roadmap-feed";
 import { getEnv } from "@/lib/kv";
+import { buildPageMetadata } from "@/lib/page-meta";
 
 export const revalidate = 1800;
 
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
   const isZh = locale === "zh";
-  return {
+  return buildPageMetadata({
+    path: "/roadmap",
+    locale,
     title: isZh ? "路线图 · Codewhale" : "Roadmap · Codewhale",
     description: isZh
       ? "Codewhale 已完成、进行中、考虑中和明确不在范围内的工作。"
       : "Current Codewhale work grouped by shipped, underway, considered, and deliberately out-of-scope directions.",
-  };
+  });
 }
 
 const tracksEn = [
   {
     title: "Shipped",
     items: [
-      { title: "Typed tool surface", note: "read, write, edit, patch, grep, shell, git, web search — plus sub-agents, RLM, and MCP" },
-      { title: "Sub-agent parallel execution", note: "agent; up to 10 concurrent sessions with bounded result handles" },
+      { title: "Canonical action tools", note: "Bash, File, Git, and Run; agent, tasks, update_plan, work_update, and tool_search complete the nine-tool default surface. Web is deferred and conditional." },
+      { title: "Sub-agent parallel execution", note: "agent; 64 concurrent sessions by default, configurable to 128, with bounded result handles" },
       { title: "RLM batched processing", note: "Persistent sandboxed Python REPL with 1–16 cheap parallel children for long-input analysis" },
       { title: "Three operating modes", note: "Plan (read-only), Act (execution), Operate (Fleet/Workflow orchestration); orthogonal Ask / Auto-Review / Full Access posture" },
       { title: "Per-platform sandbox", note: "seatbelt (macOS), landlock (Linux); Windows containment via restricted tokens (limited)" },
       { title: "Durable sessions + tasks", note: "Save, resume, rollback; background task queue with replayable timelines under ~/.codewhale/tasks/" },
       { title: "Bidirectional MCP", note: "Consume tools from external servers; expose as server via `codewhale mcp`; ~/.codewhale/mcp.json" },
       { title: "Skills + unified slash palette", note: "~/.codewhale/skills/ auto-loading; /help, /mode, /status, /config, /trust, /feedback" },
-      { title: "OpenRouter provider", note: "First-class OpenRouter integration with 300+ models across dozens of providers" },
+      { title: "OpenRouter provider", note: "OpenRouter integration with 300+ models across dozens of providers" },
       { title: "OpenAI-compatible & local runtimes", note: "Generic `openai` route for any OpenAI-compatible gateway, plus vLLM, SGLang, and Ollama against your own localhost endpoints — no key required" },
       { title: "Multi-provider support", note: "Hot-swap between providers (DeepSeek, OpenAI, Anthropic, OpenRouter) per session" },
+      { title: "Local web client", note: "Implemented in the v0.9.1 source candidate: `codewhale web` is a loopback-only browser client over the Runtime API behind a one-time bootstrap session boundary; approvals and user input recover across page reloads (#4423)" },
     ],
   },
   {
     title: "Underway",
     items: [
       { title: "VS Code extension", note: "The repository ships a Phase 0 local-runtime companion: terminal launch, health checks, read-only thread summaries, and restore-point browsing. Full chat and editor actions are not part of this slice." },
-      { title: "Local web client", note: "`codewhale web` — an embedded, loopback-only browser client over the Runtime API behind a one-time bootstrap session boundary; approvals and user input recover across page reloads (#4423)" },
       { title: "Memory typed store", note: "SQLite + FTS5 backend with graph-structured agent memory and multi-signal recall (#534–#536)" },
       { title: "Feishu / Lark bot", note: "First long-connection bridge over the runtime API shipped; richer chat features underway (#757)" },
       { title: "Chinese-market & i18n", note: "Locale-aware UI, platform refinements, region-specific search backends (#755)" },
@@ -56,7 +59,7 @@ const tracksEn = [
   {
     title: "Ruled out",
     items: [
-      { title: "Telemetry / phone-home", note: "The agent runs on your machine — what happens there stays there" },
+      { title: "Codewhale product telemetry / phone-home", note: "The local runtime has no product telemetry. A selected hosted provider still receives the context required for its model turn; loopback routes can keep inference local." },
       { title: "Mandatory hosted relay for local sessions", note: "The local runtime and bring-your-own-provider routes continue to work without sending sessions through a Codewhale service" },
       { title: "Required account for the local runtime", note: "Installing and running Codewhale locally requires no account" },
       { title: "Sponsored model promotion", note: "Model picker stays neutral — no paid placement" },
@@ -77,8 +80,8 @@ const tracksZh = [
   {
     title: "已完成",
     items: [
-      { title: "类型化工具集", note: "文件读写、编辑、补丁、搜索、Shell、Git、子 Agent、RLM、MCP——覆盖日常开发全流程" },
-      { title: "子 Agent 并行执行", note: "agent；最多 10 个并发会话，通过 var_handle 有界读取结果" },
+      { title: "Canonical action 工具", note: "Bash、File、Git、Run 与 agent、tasks、update_plan、work_update、tool_search 构成九个默认工具；Web 按条件延迟加载" },
+      { title: "子 Agent 并行执行", note: "agent；默认 64 个并发会话，可配置到 128 个，通过 var_handle 有界读取结果" },
       { title: "RLM 批量处理", note: "持久沙箱 Python REPL，支持 1–16 路廉价并行子调用，处理长文本分析" },
       { title: "三种运行模式", note: "Plan（只读调查）、Act（执行）与 Operate（Fleet / Workflow 编排）；Ask、Auto-Review 与 Full Access 权限姿态独立设置" },
       { title: "跨平台沙箱", note: "seatbelt（macOS）、landlock（Linux）；Windows 通过受限令牌实现基础隔离（功能有限）" },
@@ -88,13 +91,13 @@ const tracksZh = [
       { title: "OpenRouter 提供商", note: "原生集成 OpenRouter，支持 300+ 模型，覆盖数十个提供商" },
       { title: "OpenAI 兼容与本地运行时", note: "通用 `openai` 路由可接入任意 OpenAI 兼容网关；vLLM、SGLang、Ollama 直连本地端点，无需密钥" },
       { title: "多提供商支持", note: "按会话动态切换提供商（DeepSeek、OpenAI、Anthropic、OpenRouter）" },
+      { title: "本地 Web 客户端", note: "v0.9.1 源码候选版已实现：`codewhale web` 是基于 Runtime API 与一次性引导会话边界的回环地址浏览器客户端；审批与用户输入可在页面刷新后恢复（#4423）" },
     ],
   },
   {
     title: "进行中",
     items: [
       { title: "VS Code 扩展", note: "仓库已提供 Phase 0 本地 Runtime 配套扩展：终端启动、健康检查、只读线程摘要和还原点浏览；完整聊天与编辑器操作尚未包含在此版本中。" },
-      { title: "本地 Web 客户端", note: "`codewhale web`——基于 Runtime API 的内嵌浏览器客户端，仅监听回环地址，通过一次性引导会话边界鉴权；审批与用户输入在页面刷新后可恢复（#4423）" },
       { title: "记忆类型化存储", note: "SQLite + FTS5 后端，图结构 Agent 记忆，多信号召回（#534–#536）" },
       { title: "飞书 / Lark 机器人", note: "基于 runtime API 的长连接桥接已发布首版；更丰富的对话能力进行中（#757）" },
       { title: "中国市场与国际化改进", note: "本地化 UI、平台优化、区域搜索引擎（#755）" },
@@ -114,7 +117,7 @@ const tracksZh = [
   {
     title: "暂不考虑",
     items: [
-      { title: "遥测 / 回传数据", note: "Agent 在你的机器上运行——你的数据不会离开" },
+      { title: "Codewhale 产品遥测 / 回传", note: "本地运行时没有产品遥测；选用托管 provider 时仍会发送本轮所需上下文，回环地址路由可让推理保持本地" },
       { title: "本地会话强制经过托管中继", note: "本地 Runtime 与自带提供商路由继续工作，无需把会话发送到 Codewhale 服务" },
       { title: "本地 Runtime 强制注册账户", note: "本地安装和运行 Codewhale 不需要账户" },
       { title: "赞助商模型推广", note: "模型选择器保持中立——无付费推荐位" },
@@ -172,7 +175,7 @@ export default async function RoadmapPage({ params }: { params: Promise<{ locale
     ? {
         eyebrow: "项目路线图",
         title: "路线图",
-        introduction: "这里将已经发布的工作、正在推进的工作、仍在评估的方案和明确不在范围内的方向分开列出。发布记录和 GitHub issues 会在可用时更新这些分类；否则页面使用随仓库发布的条目。",
+        introduction: "这里将已完成的仓库工作、正在推进的工作、仍在评估的方案和明确不在范围内的方向分开列出。路线图的“已完成”可包含已在源码候选版中实现的工作；安装页与首页另行标明最新已发布包。发布记录和 GitHub issues 会在可用时更新这些分类。",
         sectionLabel: "当前状态",
         sectionTitle: "按状态查看工作",
         browseIssues: "浏览 open issues ↗",
@@ -189,7 +192,7 @@ export default async function RoadmapPage({ params }: { params: Promise<{ locale
     : {
         eyebrow: "Project roadmap",
         title: "Roadmap",
-        introduction: "This page separates work that has shipped from work in progress, proposals still being evaluated, and directions intentionally kept out of scope. Release records and GitHub issues refresh these categories when available; otherwise the page uses entries shipped with the repository.",
+        introduction: "This page separates completed repository work from work in progress, proposals still being evaluated, and directions intentionally kept out of scope. Roadmap Shipped can include work implemented in a source candidate; the install page and homepage separately identify the latest published package. Release records and GitHub issues refresh these categories when available.",
         sectionLabel: "Current status",
         sectionTitle: "Work grouped by status",
         browseIssues: "Browse open issues ↗",

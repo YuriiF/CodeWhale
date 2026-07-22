@@ -62,8 +62,10 @@ export function Footer({ locale = "en" }: { locale?: Locale }) {
 
       <div className="site-footer-meta">
         <p>
-          {isZh ? "官方源码与发布：" : "Canonical source and releases: "}
+          {isZh ? "官方源码：" : "Canonical source: "}
           <a href="https://github.com/Hmbown/CodeWhale">github.com/Hmbown/CodeWhale</a>
+          {isZh ? " · 发布：" : " · Releases: "}
+          <a href="https://github.com/Hmbown/CodeWhale/releases">GitHub Releases</a>
         </p>
         <div>
           {GITEE_ENABLED && <a href="https://gitee.com/Hmbown/CodeWhale">Gitee</a>}

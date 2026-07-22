@@ -3,6 +3,7 @@ import { Seal } from "@/components/seal";
 import { FeedCard } from "@/components/feed-card";
 import { fetchFeed } from "@/lib/github";
 import { getEnv } from "@/lib/kv";
+import { buildPageMetadata } from "@/lib/page-meta";
 import type { FeedItem } from "@/lib/types";
 
 export const revalidate = 600;
@@ -10,12 +11,14 @@ export const revalidate = 600;
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
   const isZh = locale === "zh";
-  return {
+  return buildPageMetadata({
+    path: "/feed",
+    locale,
     title: isZh ? "动态 · Codewhale" : "Activity · Codewhale",
     description: isZh
       ? "来自 Hmbown/CodeWhale GitHub 仓库的议题、合并请求和发布的实时动态。"
       : "Live feed of issues, pull requests, and releases mirrored from the Hmbown/CodeWhale GitHub repo.",
-  };
+  });
 }
 
 export default async function FeedPage({ params }: { params: Promise<{ locale: string }> }) {

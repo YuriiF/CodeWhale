@@ -1,16 +1,19 @@
 import Link from "next/link";
 import { Seal } from "@/components/seal";
 import { FaqSearch } from "@/components/faq-search";
+import { buildPageMetadata } from "@/lib/page-meta";
 
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
   const isZh = locale === "zh";
-  return {
+  return buildPageMetadata({
+    path: "/faq",
+    locale,
     title: isZh ? "常见问题 · Codewhale" : "FAQ · Codewhale",
     description: isZh
       ? "Codewhale 常见问题：安装、配置、提供商、模型、模式、安全与隐私。答案来自实际代码、文档和 GitHub 议题。"
       : "Codewhale frequently asked questions: install, config, providers, models, modes, security, and privacy. Answers sourced from real code, docs, and GitHub issues.",
-  };
+  });
 }
 
 interface FaqItem {
@@ -33,7 +36,7 @@ const faqEn: FaqItem[] = [
     q: "How do I install Codewhale?",
     a: (
       <>
-        <p className="mb-2">Four paths, same result:</p>
+        <p className="mb-2">Published channels differ in timing and platform support:</p>
         <pre className="code-block mb-2">
 {`# npm (recommended — no Rust toolchain needed)
 npm install -g codewhale
@@ -50,11 +53,13 @@ brew tap Hmbown/deepseek-tui && brew install deepseek-tui
         </pre>
         <p>
           Run <code className="inline">codewhale</code> to start. First run creates <code className="inline">~/.codewhale/</code> automatically. Legacy <code className="inline">~/.deepseek/</code> is still read as a compatibility fallback.
+          Android arm64 / Termux is preview support: npm works only when the
+          selected package version has matching Android assets in its GitHub Release.
           See the <Link href="/install" className="body-link">full install guide</Link> for China mirrors, Docker, and troubleshooting.
         </p>
       </>
     ),
-    sources: ["README.md", "#1860", "#1914"],
+    sources: ["README.md", "docs/INSTALL.md", "#1860", "#1914"],
   },
   {
     q: "What's the difference between codewhale and codewhale-tui?",
@@ -63,7 +68,8 @@ brew tap Hmbown/deepseek-tui && brew install deepseek-tui
         <code className="inline">codewhale</code> is the dispatcher CLI — it manages config, auth, updates, and launches the TUI.
         <code className="inline">codewhale-tui</code> is the terminal UI binary that runs the agent loop.
         When you type <code className="inline">codewhale</code>, the dispatcher spawns <code className="inline">codewhale-tui</code> for you.
-        Both are installed together; you rarely need to think about the split.
+        npm and release bundles install them together. Cargo users install the
+        <code className="inline">codewhale-cli</code> and <code className="inline">codewhale-tui</code> crates separately.
       </>
     ),
     sources: ["README.md"],
@@ -214,13 +220,17 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
     q: "Is my code safe? What sandboxing does Codewhale use?",
     a: (
       <>
-        Codewhale runs entirely on your machine. No telemetry, no cloud processing of your code.
+        The Codewhale runtime, workspace state, and audit log stay on your machine;
+        Codewhale has no product telemetry or mandatory hosted relay. The hosted
+        provider you select receives the prompt, project context, tool definitions,
+        and tool results required for that turn. Use a loopback local-model route to
+        keep model inference local.
         Sandbox backends: <strong>seatbelt</strong> (macOS), <strong>landlock</strong> (Linux), restricted tokens (Windows).
         Workspace boundaries default to <code className="inline">--workspace</code>. <code className="inline">/trust</code> lifts them.
         Permission posture is configurable per session. All credential/approval/elevation events are written to <code className="inline">~/.codewhale/audit.log</code>.
       </>
     ),
-    sources: ["SECURITY.md", "docs/ARCHITECTURE.md"],
+    sources: ["SECURITY.md", "docs/PROVIDERS.md", "docs/RUNTIME_API.md"],
   },
   {
     q: "How do MCP servers work?",
@@ -263,7 +273,7 @@ registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"`}
         </pre>
         <p>
           Prebuilt binaries are also available from <a href="https://github.com/Hmbown/CodeWhale/releases" className="body-link">GitHub Releases</a>.
-          The Gitee mirror and CNB mirror may also be available.
+          A maintained CNB mirror covers its documented targets; no Gitee mirror is advertised until one exists.
         </p>
       </>
     ),
@@ -378,7 +388,7 @@ const faqZh: FaqItem[] = [
     q: "如何安装 Codewhale？",
     a: (
       <>
-        <p className="mb-2">四种方式，殊途同归：</p>
+        <p className="mb-2">已发布渠道的更新时间与平台覆盖各不相同：</p>
         <pre className="code-block mb-2">
 {`# npm（推荐 — 无需 Rust 工具链）
 npm install -g codewhale
@@ -395,11 +405,12 @@ brew tap Hmbown/deepseek-tui && brew install deepseek-tui
         </pre>
         <p>
           输入 <code className="inline">codewhale</code> 即可启动。首次运行会自动创建 <code className="inline">~/.codewhale/</code>。旧版 <code className="inline">~/.deepseek/</code> 仍会作为兼容回退读取。
+          Android arm64 / Termux 仍是预览支持：只有当所选 npm 包版本对应的 GitHub Release 发布了匹配的 Android 资产时，npm 安装才可用。
           查看 <Link href="/zh/install" className="body-link">完整安装指南</Link> 了解国内镜像、Docker 和故障排除。
         </p>
       </>
     ),
-    sources: ["README.md", "#1860", "#1914"],
+    sources: ["README.md", "docs/INSTALL.md", "#1860", "#1914"],
   },
   {
     q: "codewhale 和 codewhale-tui 有什么区别？",
@@ -408,7 +419,8 @@ brew tap Hmbown/deepseek-tui && brew install deepseek-tui
         <code className="inline">codewhale</code> 是调度 CLI——管理配置、认证、更新，并启动 TUI。
         <code className="inline">codewhale-tui</code> 是运行智能体循环的终端 UI 二进制文件。
         当你输入 <code className="inline">codewhale</code> 时，调度器会自动为你启动 <code className="inline">codewhale-tui</code>。
-        两者同时安装；通常你不需要关心这个区别。
+        npm 与发布归档会同时安装两者。Cargo 用户需要分别安装
+        <code className="inline">codewhale-cli</code> 与 <code className="inline">codewhale-tui</code> crate。
       </>
     ),
     sources: ["README.md"],
@@ -557,13 +569,15 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
     q: "我的代码安全吗？Codewhale 使用什么沙箱机制？",
     a: (
       <>
-        Codewhale 完全在你的机器上运行。无遥测，不会将你的代码上传到云端处理。
+        Codewhale 运行时、工作区状态与审计日志保留在你的机器上；Codewhale
+        没有产品遥测，也不要求经过托管中继。你选择的托管 provider 会收到本轮所需的
+        prompt、项目上下文、工具定义与工具结果。若要让模型推理也保持本地，请使用回环地址上的本地模型路由。
         沙箱后端：<strong>seatbelt</strong>（macOS）、<strong>landlock</strong>（Linux）、受限令牌（Windows）。
         工作区边界默认为 <code className="inline">--workspace</code>。<code className="inline">/trust</code> 可解除边界。
         权限姿态可按会话配置。所有凭证/审批/提权事件写入 <code className="inline">~/.codewhale/audit.log</code>。
       </>
     ),
-    sources: ["SECURITY.md", "docs/ARCHITECTURE.md"],
+    sources: ["SECURITY.md", "docs/PROVIDERS.md", "docs/RUNTIME_API.md"],
   },
   {
     q: "MCP 服务器如何工作？",
@@ -606,7 +620,7 @@ registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"`}
         </pre>
         <p>
           也可以从 <a href="https://github.com/Hmbown/CodeWhale/releases" className="body-link">GitHub Releases</a> 直接下载预编译二进制。
-          Gitee 镜像和 CNB 镜像也可能可用。
+          维护中的 CNB 镜像覆盖其文档列出的目标；Gitee 镜像只有实际存在后才会对外展示。
         </p>
       </>
     ),
